@@ -1,0 +1,9 @@
+.env
+*.log
+__pycache__/
+*.pyc
+*.db
+*.sqlite
+chroma_data/
+credentials.json
+token.json

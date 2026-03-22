@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mira brand colours -->
+    <color name="primary">#7C3AED</color>
+    <color name="primary_light">#A78BFA</color>
+    <color name="primary_dark">#5B21B6</color>
+    <color name="accent">#6366F1</color>
+
+    <color name="background_dark">#0F0B1A</color>
+    <color name="background_card">#1A1425</color>
+
+    <color name="text_primary">#F5F3FF</color>
+    <color name="text_muted">#6B7280</color>
+
+    <!-- Notification tint colour -->
+    <color name="notification_color">#7C3AED</color>
+</resources>

@@ -1,0 +1,36 @@
+# Environment & secrets
+.env
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Data (generated at runtime)
+agent/data/
+agent/logs/
+*.db
+*.sqlite
+
+# Node
+node_modules/
+dashboard/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# PIDs
+.api.pid
+.dashboard.pid
+
+# Claude
+.claude/
