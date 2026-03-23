@@ -1,7 +1,7 @@
 import { Routes, Route, NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Brain, Users, Settings, Calendar,
-  TrendingUp, DollarSign, Activity, Shield, Banknote
+  TrendingUp, DollarSign, Activity, Shield, Banknote, Key
 } from 'lucide-react'
 
 import Dashboard from './pages/Dashboard'
@@ -13,8 +13,10 @@ import CostTracker from './pages/CostTracker'
 import ActionLog from './pages/ActionLog'
 import EarningsPage from './pages/EarningsPage'
 import SettingsPage from './pages/SettingsPage'
+import SetupPage from './pages/SetupPage'
 
 const navItems = [
+  { to: '/setup', icon: Key, label: 'Setup' },
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/calendar', icon: Calendar, label: 'Calendar' },
   { to: '/memory', icon: Brain, label: 'Memory' },
@@ -67,6 +69,7 @@ export default function App() {
       {/* Main content */}
       <main className="flex-1 overflow-y-auto bg-gray-950 p-8">
         <Routes>
+          <Route path="/setup" element={<SetupPage />} />
           <Route path="/" element={<Dashboard />} />
           <Route path="/calendar" element={<CalendarView />} />
           <Route path="/memory" element={<MemoryBrowser />} />

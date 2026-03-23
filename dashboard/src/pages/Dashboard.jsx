@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { Brain, Users, TrendingUp, DollarSign, Activity, Zap, Target, Clock, ShieldOff, ShieldCheck } from 'lucide-react'
-import { getKPIs, getRecentMemories, getActions, getKillSwitchStatus, activateKillSwitch, deactivateKillSwitch } from '../api/client'
+import { Link } from 'react-router-dom'
+import { Brain, Users, TrendingUp, DollarSign, Activity, Zap, Target, Clock, ShieldOff, ShieldCheck, AlertTriangle } from 'lucide-react'
+import { getKPIs, getRecentMemories, getActions, getKillSwitchStatus, activateKillSwitch, deactivateKillSwitch, getSetupStatus } from '../api/client'
 
 function KPICard({ icon: Icon, label, value, sub, color = 'text-mira-400' }) {
   return (
@@ -25,6 +26,12 @@ export default function Dashboard() {
   const [killSwitchActive, setKillSwitchActive] = useState(false)
   const [showKillConfirm, setShowKillConfirm] = useState(false)
   const [killSwitchLoading, setKillSwitchLoading] = useState(false)
+  const [setupNeeded, setSetupNeeded] = useState(false)
+  const [setupDismissed, setSetupDismissed] = useState(false)
+
+  useEffect(() => {
+    getSetupStatus().then(s => setSetupNeeded(!s.setup_complete)).catch(() => {})
+  }, [])
 
   useEffect(() => {
     async function load() {
@@ -92,6 +99,27 @@ export default function Dashboard() {
 
   return (
     <div>
+      {/* Setup Needed Banner */}
+      {setupNeeded && !setupDismissed && (
+        <div className="mb-6 bg-gradient-to-r from-purple-900/50 to-amber-900/30 border border-purple-500/30 rounded-xl p-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-400" />
+            <div>
+              <span className="text-sm font-medium text-white">Mira needs API keys to get started</span>
+              <span className="text-xs text-gray-400 ml-2">Configure your Anthropic and Telegram keys</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <Link to="/setup" className="bg-purple-600 hover:bg-purple-500 text-white text-sm px-4 py-1.5 rounded-lg">
+              Go to Setup &rarr;
+            </Link>
+            <button onClick={() => setSetupDismissed(true)} className="text-gray-500 hover:text-gray-300 text-sm">
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Kill Switch Confirmation Dialog */}
       {showKillConfirm && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center">

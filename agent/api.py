@@ -6,6 +6,8 @@ Accessible via Tailscale from any device.
 
 import json
 import logging
+import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -13,6 +15,11 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
 
 from config import Config
 from memory.sqlite_store import SQLiteStore
@@ -356,6 +363,195 @@ SETTINGS_SCHEMA = {
         "polymarket_enabled": {"type": "bool", "default": False, "label": "Polymarket Enabled"},
     },
 }
+
+
+# ── ENV KEY SETUP SCHEMA ──────────────────────────────────────
+ENV_KEYS_SCHEMA = [
+    {"key": "ANTHROPIC_API_KEY", "label": "Anthropic API Key", "group": "core", "required": True, "test_service": "anthropic", "help": "Get from console.anthropic.com"},
+    {"key": "TELEGRAM_BOT_TOKEN", "label": "Telegram Bot Token", "group": "core", "required": True, "test_service": "telegram_bot", "help": "Create via @BotFather on Telegram"},
+    {"key": "TELEGRAM_CHAT_ID", "label": "Telegram Chat ID", "group": "core", "required": True, "test_service": "telegram_chat", "help": "Your numeric Telegram user ID (send /start to @userinfobot)"},
+    {"key": "ELEVENLABS_API_KEY", "label": "ElevenLabs API Key", "group": "voice", "required": False, "test_service": "elevenlabs", "help": "For voice synthesis — elevenlabs.io"},
+    {"key": "ELEVENLABS_VOICE_ID", "label": "ElevenLabs Voice ID", "group": "voice", "required": False, "test_service": None, "help": "Voice ID from ElevenLabs dashboard"},
+    {"key": "GOOGLE_CREDENTIALS_PATH", "label": "Google Credentials Path", "group": "google", "required": False, "test_service": None, "help": "Path to OAuth credentials JSON file"},
+    {"key": "ENCRYPT_KEY", "label": "Encryption Key", "group": "security", "required": False, "test_service": None, "help": "AES-256 key for data at rest encryption"},
+    {"key": "PRIORITY_SENDERS", "label": "Priority Email Senders", "group": "google", "required": False, "test_service": None, "help": "Comma-separated emails that bypass work-hours rules"},
+]
+
+
+def _read_env_file() -> dict:
+    """Read .env file into dict."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        example = Path(__file__).parent / ".env.example"
+        if example.exists():
+            shutil.copy2(example, env_path)
+        else:
+            env_path.touch()
+    values = {}
+    with open(env_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def _write_env_file(updates: dict):
+    """Atomically update .env file with new key values."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        example = Path(__file__).parent / ".env.example"
+        if example.exists():
+            shutil.copy2(example, env_path)
+        else:
+            env_path.touch()
+    existing_lines = []
+    with open(env_path, "r") as f:
+        existing_lines = f.readlines()
+    updated_keys = set()
+    new_lines = []
+    for line in existing_lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in updates:
+                new_lines.append(f"{key}={updates[key]}\n")
+                updated_keys.add(key)
+                continue
+        new_lines.append(line)
+    for key, value in updates.items():
+        if key not in updated_keys:
+            new_lines.append(f"{key}={value}\n")
+    tmp_path = env_path.with_suffix(".tmp")
+    with open(tmp_path, "w") as f:
+        f.writelines(new_lines)
+    os.replace(tmp_path, env_path)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(env_path, override=True)
+        Config.reload()
+    except Exception:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════
+# SETUP / API KEY MANAGEMENT
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/setup/status")
+async def get_setup_status():
+    """Return configuration status for all env keys (masked values only)."""
+    env_values = _read_env_file()
+    keys = []
+    missing_required = []
+    for schema in ENV_KEYS_SCHEMA:
+        val = env_values.get(schema["key"], "")
+        configured = bool(val and val != "your-key-here" and not val.startswith("your-"))
+        masked = f"****{val[-4:]}" if configured and len(val) >= 4 else None
+        keys.append({
+            "key": schema["key"],
+            "label": schema["label"],
+            "group": schema["group"],
+            "required": schema["required"],
+            "configured": configured,
+            "masked_value": masked,
+            "help": schema["help"],
+            "test_service": schema.get("test_service"),
+        })
+        if schema["required"] and not configured:
+            missing_required.append(schema["key"])
+    return {
+        "keys": keys,
+        "setup_complete": len(missing_required) == 0,
+        "missing_required": missing_required,
+    }
+
+
+class EnvKeysUpdate(BaseModel):
+    keys: dict
+
+
+@app.post("/api/setup/keys")
+async def save_setup_keys(payload: EnvKeysUpdate):
+    """Save API keys to .env file. Only allows keys from ENV_KEYS_SCHEMA."""
+    allowed_keys = {s["key"] for s in ENV_KEYS_SCHEMA}
+    updates = {}
+    for key, value in payload.keys.items():
+        if key not in allowed_keys:
+            continue
+        updates[key] = str(value).strip()
+    if updates:
+        _write_env_file(updates)
+        if db:
+            db.log_action("setup", f"Updated API keys: {', '.join(updates.keys())}")
+    return await get_setup_status()
+
+
+@app.post("/api/setup/test/{service}")
+async def test_setup_service(service: str):
+    """Test connectivity for a specific service."""
+    env_values = _read_env_file()
+    try:
+        if service == "anthropic":
+            import anthropic as anthropic_lib
+            key = env_values.get("ANTHROPIC_API_KEY", "")
+            if not key:
+                return {"service": service, "status": "error", "message": "API key not configured"}
+            client = anthropic_lib.Anthropic(api_key=key)
+            client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=10,
+                messages=[{"role": "user", "content": "Say hi"}],
+            )
+            return {"service": service, "status": "ok", "message": "Connected to Anthropic API"}
+
+        elif service == "telegram_bot":
+            if not httpx:
+                return {"service": service, "status": "error", "message": "httpx not installed"}
+            token = env_values.get("TELEGRAM_BOT_TOKEN", "")
+            if not token:
+                return {"service": service, "status": "error", "message": "Bot token not configured"}
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+                data = resp.json()
+                if data.get("ok"):
+                    return {"service": service, "status": "ok", "message": f"Connected to @{data['result'].get('username', '?')}"}
+                return {"service": service, "status": "error", "message": data.get("description", "Unknown error")}
+
+        elif service == "telegram_chat":
+            if not httpx:
+                return {"service": service, "status": "error", "message": "httpx not installed"}
+            token = env_values.get("TELEGRAM_BOT_TOKEN", "")
+            chat_id = env_values.get("TELEGRAM_CHAT_ID", "")
+            if not token or not chat_id:
+                return {"service": service, "status": "error", "message": "Bot token or chat ID not configured"}
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": "Mira setup test — connection confirmed!"},
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    return {"service": service, "status": "ok", "message": "Test message sent to your Telegram"}
+                return {"service": service, "status": "error", "message": data.get("description", "Unknown error")}
+
+        elif service == "elevenlabs":
+            if not httpx:
+                return {"service": service, "status": "error", "message": "httpx not installed"}
+            key = env_values.get("ELEVENLABS_API_KEY", "")
+            if not key:
+                return {"service": service, "status": "error", "message": "API key not configured"}
+            async with httpx.AsyncClient() as client:
+                resp = await client.get("https://api.elevenlabs.io/v1/user", headers={"xi-api-key": key})
+                if resp.status_code == 200:
+                    return {"service": service, "status": "ok", "message": "Connected to ElevenLabs"}
+                return {"service": service, "status": "error", "message": f"Auth failed (HTTP {resp.status_code})"}
+
+        else:
+            return {"service": service, "status": "error", "message": f"Unknown service: {service}"}
+    except Exception as e:
+        return {"service": service, "status": "error", "message": str(e)}
 
 
 @app.get("/api/settings/schema")

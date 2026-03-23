@@ -81,6 +81,29 @@ class Config:
     ENCRYPT_AT_REST = os.getenv("ENCRYPT_AT_REST", "true").lower() == "true"
 
     @classmethod
+    def reload(cls):
+        """Re-read all config values from os.environ (call after .env update)."""
+        from dotenv import load_dotenv
+        load_dotenv(AGENT_DIR / ".env", override=True)
+
+        cls.ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+        cls.TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        cls.TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+        cls.CLAUDE_MODEL_FAST = os.getenv("CLAUDE_MODEL_FAST", "claude-haiku-4-5-20251001")
+        cls.CLAUDE_MODEL_STANDARD = os.getenv("CLAUDE_MODEL_STANDARD", "claude-sonnet-4-5-20250514")
+        cls.CLAUDE_MODEL_DEEP = os.getenv("CLAUDE_MODEL_DEEP", "claude-opus-4-20250514")
+        cls.CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250514")
+        cls.CLAUDE_MAX_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", "4096"))
+        cls.TICK_INTERVAL = int(os.getenv("TICK_INTERVAL", "5"))
+        cls.TIMEZONE = os.getenv("TIMEZONE", "Asia/Manila")
+        cls.MAX_DAILY_DRAWDOWN_PCT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT", "3.0"))
+        cls.MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", "0.1"))
+        cls.MAX_TOTAL_EXPOSURE = float(os.getenv("MAX_TOTAL_EXPOSURE", "5.0"))
+        cls.BRIEFING_TIME = os.getenv("BRIEFING_TIME", "07:00")
+        cls.BRIEFING_TIMEZONE = os.getenv("BRIEFING_TIMEZONE", "Asia/Manila")
+        cls.ENCRYPT_AT_REST = os.getenv("ENCRYPT_AT_REST", "true").lower() == "true"
+
+    @classmethod
     def ensure_dirs(cls):
         """Create required directories if they don't exist."""
         cls.DATA_DIR.mkdir(parents=True, exist_ok=True)

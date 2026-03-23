@@ -85,3 +85,12 @@ export const getEarnings = () => fetchAPI('/earnings')
 
 // ── Modules ───────────────────────────────────────────────────
 export const getModules = () => fetchAPI('/modules')
+
+// ── Setup / API Key Management ───────────────────────────────
+export const getSetupStatus = () => fetchAPI('/setup/status')
+export const saveSetupKeys = (keys) => fetchAPI('/setup/keys', {
+  method: 'POST', body: JSON.stringify({ keys }),
+})
+export const testSetupService = (service) => fetchAPI(`/setup/test/${service}`, {
+  method: 'POST',
+})
