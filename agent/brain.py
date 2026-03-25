@@ -2,11 +2,13 @@
 Mira's Brain — Claude API integration with tiered model routing.
 
 Tier system:
+- local (Ollama): On-device, free — classification, entity extraction, formatting
 - fast (Haiku): JSON extraction, classification, simple parsing — ~$0.80/1M input
 - standard (Sonnet): Conversation, analysis, drafting — ~$3/1M input
 - deep (Opus): Research, decision briefs, complex reasoning — ~$15/1M input
 
-~70% of calls go to Haiku, cutting costs by 60-70%.
+Simple tasks try the local model first. If unavailable or quality is poor,
+they silently escalate to Haiku. The user never sees an error from local.
 """
 
 import json
@@ -16,10 +18,118 @@ from typing import Optional
 
 import anthropic
 
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
 from config import Config
 from personality import MIRA_SYSTEM_PROMPT, get_system_prompt
 
 logger = logging.getLogger("mira.brain")
+
+# Tasks that should NEVER use local model (need personality or complex reasoning)
+LOCAL_BLOCKED_TASKS = frozenset({
+    "conversation",
+    "draft_reply",
+    "daily_briefing",
+    "deep_research",
+    "decision_brief",
+    "polymarket_analysis",
+    "analysis",
+})
+
+# Tasks that are good candidates for local model
+LOCAL_ELIGIBLE_TASKS = frozenset({
+    "entity_extraction",
+    "classification",
+    "sentiment_analysis",
+    "keyword_extraction",
+    "simple_qa",
+    "data_formatting",
+    "text_summarization_short",
+})
+
+
+class LocalLLMClient:
+    """Client for local LLM inference via Ollama / OpenAI-compatible API."""
+
+    def __init__(self, base_url: str, model: str, timeout: int = 30):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout = timeout
+        self._available = False
+        if httpx:
+            self._http = httpx.AsyncClient(timeout=timeout)
+        else:
+            self._http = None
+
+    async def check_health(self) -> bool:
+        """Ping the local model server. Returns True if reachable."""
+        if not self._http:
+            self._available = False
+            return False
+
+        # Try Ollama endpoint
+        try:
+            resp = await self._http.get(f"{self.base_url}/api/tags", timeout=5)
+            if resp.status_code == 200:
+                self._available = True
+                return True
+        except Exception:
+            pass
+
+        # Try OpenAI-compatible endpoint
+        try:
+            resp = await self._http.get(f"{self.base_url}/v1/models", timeout=5)
+            if resp.status_code == 200:
+                self._available = True
+                return True
+        except Exception:
+            pass
+
+        self._available = False
+        return False
+
+    @property
+    def is_available(self) -> bool:
+        return self._available
+
+    async def chat(self, messages: list, system: str = None, max_tokens: int = 1024) -> dict:
+        """Send a chat completion request. Returns dict with text, input_tokens, output_tokens."""
+        if not self._http:
+            raise RuntimeError("httpx not installed")
+
+        payload = {
+            "model": self.model,
+            "messages": [],
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+            "stream": False,
+        }
+        if system:
+            payload["messages"].append({"role": "system", "content": system})
+        payload["messages"].extend(messages)
+
+        resp = await self._http.post(
+            f"{self.base_url}/v1/chat/completions",
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        choice = data["choices"][0]
+        usage = data.get("usage", {})
+
+        return {
+            "text": choice["message"]["content"],
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+        }
+
+    async def close(self):
+        if self._http:
+            await self._http.aclose()
 
 
 class MiraBrain:
@@ -27,23 +137,77 @@ class MiraBrain:
 
     def __init__(self, sqlite_store=None):
         self.client = None
-        self.sqlite = sqlite_store  # For logging API usage
+        self.local_client = None
+        self.sqlite = sqlite_store
         self.conversation_history = []
         self.max_history = 20
 
     def initialise(self):
-        """Set up the Anthropic client."""
+        """Set up the Anthropic client and optional local model."""
         if not Config.ANTHROPIC_API_KEY:
             logger.error("Cannot initialise brain: ANTHROPIC_API_KEY not set")
             return False
 
         self.client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-        logger.info(
+
+        tier_info = (
             f"Brain initialised — Fast: {Config.CLAUDE_MODEL_FAST}, "
             f"Standard: {Config.CLAUDE_MODEL_STANDARD}, "
             f"Deep: {Config.CLAUDE_MODEL_DEEP}"
         )
+
+        # Initialize local model if enabled
+        if Config.LOCAL_MODEL_ENABLED:
+            self.local_client = LocalLLMClient(
+                base_url=Config.LOCAL_MODEL_URL,
+                model=Config.LOCAL_MODEL_NAME,
+                timeout=Config.LOCAL_MODEL_TIMEOUT,
+            )
+            tier_info += f", Local: {Config.LOCAL_MODEL_NAME}"
+            logger.info(f"Local model configured: {Config.LOCAL_MODEL_NAME} at {Config.LOCAL_MODEL_URL}")
+
+        logger.info(tier_info)
         return True
+
+    async def refresh_local_model_status(self):
+        """Re-check if local model is available. Call periodically."""
+        if self.local_client:
+            was = self.local_client.is_available
+            now = await self.local_client.check_health()
+            if was != now:
+                status = "online" if now else "offline"
+                logger.info(f"Local model status changed: {status}")
+
+    def _local_quality_check_failed(self, response: str, task_type: str) -> bool:
+        """Check if local model response is too low quality. Returns True if should escalate."""
+        if not response or not response.strip():
+            return True
+
+        stripped = response.strip()
+
+        # Too short for structured tasks
+        if task_type in ("entity_extraction", "email_triage") and len(stripped) < 10:
+            return True
+
+        # JSON tasks must be parseable
+        if task_type in ("entity_extraction", "email_triage", "classification"):
+            cleaned = stripped
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
+            try:
+                json.loads(cleaned)
+            except json.JSONDecodeError:
+                return True
+
+        # Repetition detector (local models sometimes loop)
+        if len(stripped) > 100:
+            words = stripped.split()
+            if len(words) > 20:
+                unique_ratio = len(set(words)) / len(words)
+                if unique_ratio < 0.3:
+                    return True
+
+        return False
 
     async def think(
         self,
@@ -75,6 +239,53 @@ class MiraBrain:
             messages.extend(self.conversation_history[-self.max_history:])
         messages.append({"role": "user", "content": message})
 
+        # ── Local model path ────────────────────────────────────
+        if tier == "local" and self.local_client and self.local_client.is_available:
+            if task_type in LOCAL_BLOCKED_TASKS:
+                logger.info(f"[local->fast] {task_type} not eligible for local, escalating")
+                tier = "fast"
+                model = Config.get_model_for_tier("fast")
+            else:
+                try:
+                    result = await self.local_client.chat(
+                        messages=messages,
+                        system=system_override or "You are a precise assistant. Return concise, structured responses.",
+                        max_tokens=max_tokens or Config.LOCAL_MODEL_MAX_TOKENS,
+                    )
+                    reply = result["text"]
+
+                    if self._local_quality_check_failed(reply, task_type):
+                        logger.warning(f"[local->fast] Quality gate failed for {task_type}, escalating")
+                        tier = "fast"
+                        model = Config.get_model_for_tier("fast")
+                    else:
+                        input_tokens = result["input_tokens"]
+                        output_tokens = result["output_tokens"]
+                        logger.info(
+                            f"[local] {task_type}: {Config.LOCAL_MODEL_NAME} | "
+                            f"{input_tokens}in/{output_tokens}out | $0.0000"
+                        )
+                        if self.sqlite:
+                            self.sqlite.log_api_usage(
+                                model=Config.LOCAL_MODEL_NAME,
+                                tier="local",
+                                task_type=task_type,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                estimated_cost=0.0,
+                            )
+                        return reply
+                except Exception as e:
+                    logger.warning(f"[local->fast] Local model error: {e}, falling back to Haiku")
+                    tier = "fast"
+                    model = Config.get_model_for_tier("fast")
+
+        elif tier == "local":
+            logger.debug("Local model not available, falling back to fast tier")
+            tier = "fast"
+            model = Config.get_model_for_tier("fast")
+
+        # ── Anthropic API path ──────────────────────────────────
         try:
             response = self.client.messages.create(
                 model=model,
@@ -146,7 +357,7 @@ Text: {text}"""
             include_history=False,
             system_override="You are a precise entity extraction system. Return ONLY valid JSON, no other text.",
             max_tokens=1024,
-            tier="fast",
+            tier="local",
             task_type="entity_extraction",
         )
 

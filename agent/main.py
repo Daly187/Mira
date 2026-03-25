@@ -453,6 +453,16 @@ class Mira:
         """Single iteration of the core loop."""
         await self.scheduler.tick()
         await self._check_escalations()
+        # Refresh local model status every 60 seconds (12 ticks at 5s interval)
+        if not hasattr(self, '_local_check_counter'):
+            self._local_check_counter = 0
+        self._local_check_counter += 1
+        if self._local_check_counter >= 12:
+            self._local_check_counter = 0
+            try:
+                await self.brain.refresh_local_model_status()
+            except Exception:
+                pass
 
     async def _check_escalations(self):
         """Re-send unacknowledged notifications after 15 minutes, up to 5 times."""

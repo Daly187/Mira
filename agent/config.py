@@ -39,16 +39,26 @@ class Config:
     CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250514")
     CLAUDE_MAX_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", "4096"))
 
+    # ── Local Model (Optional — on-device via Ollama) ─────────
+    LOCAL_MODEL_ENABLED = os.getenv("LOCAL_MODEL_ENABLED", "false").lower() == "true"
+    LOCAL_MODEL_URL = os.getenv("LOCAL_MODEL_URL", "http://localhost:11434")
+    LOCAL_MODEL_NAME = os.getenv("LOCAL_MODEL_NAME", "phi3:mini")
+    LOCAL_MODEL_MAX_TOKENS = int(os.getenv("LOCAL_MODEL_MAX_TOKENS", "1024"))
+    LOCAL_MODEL_TIMEOUT = int(os.getenv("LOCAL_MODEL_TIMEOUT", "30"))
+
     # Cost per 1M tokens (for tracking)
     MODEL_COSTS = {
         "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
         "claude-sonnet-4-5-20250514": {"input": 3.00, "output": 15.00},
         "claude-opus-4-20250514": {"input": 15.00, "output": 75.00},
+        "local": {"input": 0.00, "output": 0.00},
     }
 
     @classmethod
     def get_model_for_tier(cls, tier: str) -> str:
         """Get model ID for a given tier."""
+        if tier == "local":
+            return cls.LOCAL_MODEL_NAME
         return {
             "fast": cls.CLAUDE_MODEL_FAST,
             "standard": cls.CLAUDE_MODEL_STANDARD,
@@ -58,6 +68,9 @@ class Config:
     @classmethod
     def estimate_cost(cls, model: str, input_tokens: int, output_tokens: int) -> float:
         """Estimate cost in USD for a given API call."""
+        # Local models are always free
+        if model == cls.LOCAL_MODEL_NAME or model == "local":
+            return 0.0
         costs = cls.MODEL_COSTS.get(model, {"input": 3.00, "output": 15.00})
         return (input_tokens * costs["input"] / 1_000_000) + (output_tokens * costs["output"] / 1_000_000)
 
@@ -102,6 +115,11 @@ class Config:
         cls.BRIEFING_TIME = os.getenv("BRIEFING_TIME", "07:00")
         cls.BRIEFING_TIMEZONE = os.getenv("BRIEFING_TIMEZONE", "Asia/Manila")
         cls.ENCRYPT_AT_REST = os.getenv("ENCRYPT_AT_REST", "true").lower() == "true"
+        cls.LOCAL_MODEL_ENABLED = os.getenv("LOCAL_MODEL_ENABLED", "false").lower() == "true"
+        cls.LOCAL_MODEL_URL = os.getenv("LOCAL_MODEL_URL", "http://localhost:11434")
+        cls.LOCAL_MODEL_NAME = os.getenv("LOCAL_MODEL_NAME", "phi3:mini")
+        cls.LOCAL_MODEL_MAX_TOKENS = int(os.getenv("LOCAL_MODEL_MAX_TOKENS", "1024"))
+        cls.LOCAL_MODEL_TIMEOUT = int(os.getenv("LOCAL_MODEL_TIMEOUT", "30"))
 
     @classmethod
     def ensure_dirs(cls):
