@@ -141,17 +141,20 @@ class ComputerUseAgent:
 
                 messages.append({"role": "user", "content": user_content})
 
-                # Step 3: Send to Claude with computer use tool
-                response = self.client.messages.create(
+                # Step 3: Send to Claude with computer use tool (requires beta)
+                response = self.client.beta.messages.create(
                     model="claude-sonnet-4-5-20250929",
                     max_tokens=1024,
-                    system="You are a computer use agent. You can see the screen and perform "
-                           "actions using the computer tool. Execute the user's task step by step. "
-                           "When the task is complete, respond with text starting with 'TASK_COMPLETE:' "
-                           "followed by a summary.",
+                    betas=["computer-use-2025-01-24"],
+                    system="You are a computer use agent controlling a Windows desktop. "
+                           "You can see the screen and perform actions using the computer tool. "
+                           "Execute the user's task step by step. Use the computer tool to "
+                           "click, type, scroll, and interact with the screen. "
+                           "When the task is fully complete, respond with text starting with "
+                           "'TASK_COMPLETE:' followed by a brief summary of what you did.",
                     messages=messages,
                     tools=[{
-                        "type": "computer_20241022",
+                        "type": "computer_20250124",
                         "name": "computer",
                         "display_width_px": self.screen_width,
                         "display_height_px": self.screen_height,
@@ -226,14 +229,20 @@ class ComputerUseAgent:
                     steps_log.append({"step": step, "action": "no_action", "note": "text-only response"})
 
             except Exception as e:
+                import traceback
                 error_msg = f"Step {step} failed: {e}"
-                logger.error(error_msg)
-                steps_log.append({"step": step, "error": error_msg})
-                # Take error screenshot for diagnostics
-                try:
-                    await self.take_screenshot()
-                except Exception:
-                    pass
+                full_trace = traceback.format_exc()
+                logger.error(f"{error_msg}\n{full_trace}")
+                steps_log.append({"step": step, "error": error_msg, "summary": str(e)})
+                # Send error to Telegram so user can see what happened
+                if self.mira.telegram:
+                    try:
+                        await self.mira.telegram.app.bot.send_message(
+                            chat_id=self.mira.telegram.chat_id,
+                            text=f"⚠️ Computer use error at step {step}:\n{str(e)[:300]}"
+                        )
+                    except Exception:
+                        pass
                 self.mira.sqlite.log_action(
                     "computer_use", f"step_{step}_error", str(e),
                 )
@@ -381,7 +390,7 @@ class ComputerUseAgent:
                     ],
                 }],
             )
-            return response.content[0].text
+            return response.content[0].text if response.content else "No analysis returned."
         except Exception as e:
             logger.error(f"Screen analysis failed: {e}")
             return f"Analysis failed: {e}"
