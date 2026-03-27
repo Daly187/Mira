@@ -32,11 +32,11 @@ class Config:
     # Fast (Haiku): JSON extraction, classification, simple parsing — cheapest
     CLAUDE_MODEL_FAST = os.getenv("CLAUDE_MODEL_FAST", "claude-haiku-4-5-20251001")
     # Standard (Sonnet): Conversation, analysis, drafting — balanced
-    CLAUDE_MODEL_STANDARD = os.getenv("CLAUDE_MODEL_STANDARD", "claude-sonnet-4-5-20250514")
+    CLAUDE_MODEL_STANDARD = os.getenv("CLAUDE_MODEL_STANDARD", "claude-sonnet-4-5-20250929")
     # Deep (Opus): Research, decision briefs, complex reasoning — best quality
-    CLAUDE_MODEL_DEEP = os.getenv("CLAUDE_MODEL_DEEP", "claude-opus-4-20250514")
+    CLAUDE_MODEL_DEEP = os.getenv("CLAUDE_MODEL_DEEP", "claude-opus-4-5-20251101")
     # Default model (backwards compat)
-    CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250514")
+    CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
     CLAUDE_MAX_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", "4096"))
 
     # ── Local Model (Optional — on-device via Ollama) ─────────
@@ -49,8 +49,8 @@ class Config:
     # Cost per 1M tokens (for tracking)
     MODEL_COSTS = {
         "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
-        "claude-sonnet-4-5-20250514": {"input": 3.00, "output": 15.00},
-        "claude-opus-4-20250514": {"input": 15.00, "output": 75.00},
+        "claude-sonnet-4-5-20250929": {"input": 3.00, "output": 15.00},
+        "claude-opus-4-5-20251101": {"input": 15.00, "output": 75.00},
         "local": {"input": 0.00, "output": 0.00},
     }
 
@@ -108,9 +108,9 @@ class Config:
         cls.TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
         cls.TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
         cls.CLAUDE_MODEL_FAST = os.getenv("CLAUDE_MODEL_FAST", "claude-haiku-4-5-20251001")
-        cls.CLAUDE_MODEL_STANDARD = os.getenv("CLAUDE_MODEL_STANDARD", "claude-sonnet-4-5-20250514")
-        cls.CLAUDE_MODEL_DEEP = os.getenv("CLAUDE_MODEL_DEEP", "claude-opus-4-20250514")
-        cls.CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250514")
+        cls.CLAUDE_MODEL_STANDARD = os.getenv("CLAUDE_MODEL_STANDARD", "claude-sonnet-4-5-20250929")
+        cls.CLAUDE_MODEL_DEEP = os.getenv("CLAUDE_MODEL_DEEP", "claude-opus-4-5-20251101")
+        cls.CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
         cls.CLAUDE_MAX_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", "4096"))
         cls.TICK_INTERVAL = int(os.getenv("TICK_INTERVAL", "5"))
         cls.TIMEZONE = os.getenv("TIMEZONE", "Asia/Manila")
