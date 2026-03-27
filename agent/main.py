@@ -571,16 +571,6 @@ class Mira:
 
         ingest_result = await self.ingest.ingest_text(text, source=source)
         context = self._build_context(text, ingest_result)
-
-        # Tell the brain it has computer use capabilities
-        if self.computer_use and self.computer_use.client:
-            context += (
-                "\n\nYou have ACTIVE computer use capabilities on this Windows desktop. "
-                "You can take screenshots, control mouse/keyboard, open apps, run commands, "
-                "and manage processes. When the user asks you to DO something on the computer, "
-                "tell them you're executing it — never say you can't."
-            )
-
         response = await self.brain.think(text, context=context)
 
         # Check for learning misconceptions and append correction if found
@@ -614,6 +604,10 @@ class Mira:
             "capture the screen", "take a screenshot",
             "show me your screen", "show the screen", "show screen",
             "send me the screen", "grab the screen", "show me the screen",
+            "send me a screenshot of", "screenshot of the",
+            "send a screenshot", "take a screen", "screen capture",
+            "print screen", "snap the screen", "screen grab",
+            "show me what's on", "show me whats on",
         ]
         # These ask a question ABOUT the screen — needs Claude Vision ($)
         analysis_triggers = [
@@ -621,6 +615,9 @@ class Mira:
             "whats on the screen", "what do you see",
             "what can you see on the screen", "what is on the screen",
             "describe the screen", "read the screen",
+            "what's happening on the screen", "whats happening on screen",
+            "what is happening on", "what are you looking at",
+            "what's open right now", "what windows are open",
         ]
 
         needs_analysis = any(trigger in lower for trigger in analysis_triggers)
