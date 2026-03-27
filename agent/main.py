@@ -607,15 +607,26 @@ class Mira:
         lower = text.lower().strip()
 
         # ── Screenshot requests ────────────────────────────────────────
+        # "send me a screenshot" = just capture + send (FREE, no AI tokens)
+        # "what's on the screen" = capture + send + AI analysis (costs tokens)
         screenshot_triggers = [
             "screenshot", "screen shot", "send me a screenshot",
-            "show me the screen", "what's on the screen", "what's on screen",
-            "whats on the screen", "capture the screen", "take a screenshot",
+            "capture the screen", "take a screenshot",
             "show me your screen", "show the screen", "show screen",
-            "what do you see", "what can you see on the screen",
-            "send me the screen", "grab the screen",
+            "send me the screen", "grab the screen", "show me the screen",
         ]
-        if any(trigger in lower for trigger in screenshot_triggers):
+        # These ask a question ABOUT the screen — needs Claude Vision ($)
+        analysis_triggers = [
+            "what's on the screen", "what's on screen",
+            "whats on the screen", "what do you see",
+            "what can you see on the screen", "what is on the screen",
+            "describe the screen", "read the screen",
+        ]
+
+        needs_analysis = any(trigger in lower for trigger in analysis_triggers)
+        needs_screenshot = needs_analysis or any(trigger in lower for trigger in screenshot_triggers)
+
+        if needs_screenshot:
             path = await self.computer_use.screenshot_to_file()
             if path and self.telegram:
                 import os
@@ -625,11 +636,16 @@ class Mira:
                             chat_id=self.telegram.chat_id, photo=photo,
                             caption="Here's what's on the screen right now."
                         )
-                    # Also do a quick analysis
-                    analysis = await self.computer_use.analyse_screen(
-                        task="Briefly describe what's visible on screen."
-                    )
-                    return f"Screenshot sent. {analysis[:500]}"
+
+                    # Only burn tokens on analysis if the user asked a question
+                    if needs_analysis:
+                        analysis = await self.computer_use.analyse_screen(
+                            task="Briefly describe what's visible on screen."
+                        )
+                        return f"Screenshot sent.\n\n{analysis[:500]}"
+
+                    # Plain screenshot = zero tokens
+                    return "Screenshot sent."
                 except Exception as e:
                     logger.error(f"Screenshot send failed: {e}")
                     return f"Captured the screen but failed to send: {e}"
