@@ -1,14 +1,30 @@
 /**
  * Mira API client — connects dashboard to the FastAPI backend.
+ * Includes Bearer token auth for remote access.
  */
 
 const API_BASE = '/api'
 
 async function fetchAPI(endpoint, options = {}) {
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  })
+  const token = localStorage.getItem('mira_api_token')
+
+  const headers = { 'Content-Type': 'application/json', ...options.headers }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  const response = await fetch(`${API_BASE}${endpoint}`, { ...options, headers })
+
+  // If 401, redirect to login (unless already on login/setup)
+  if (response.status === 401) {
+    const path = window.location.pathname
+    if (path !== '/login' && !path.startsWith('/setup')) {
+      localStorage.removeItem('mira_api_token')
+      window.location.href = '/login'
+      throw new Error('Authentication required')
+    }
+  }
+
   if (!response.ok) {
     throw new Error(`API error: ${response.status} ${response.statusText}`)
   }
@@ -94,3 +110,30 @@ export const saveSetupKeys = (keys) => fetchAPI('/setup/keys', {
 export const testSetupService = (service) => fetchAPI(`/setup/test/${service}`, {
   method: 'POST',
 })
+
+// ── Auth ─────────────────────────────────────────────────────
+export const checkAuth = async () => {
+  try {
+    const token = localStorage.getItem('mira_api_token')
+    const res = await fetch(`${API_BASE}/health`, {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+    })
+    if (!res.ok) return false
+    const data = await res.json()
+    // If no auth required, auto-login
+    if (!data.auth_required) return true
+    // If auth required, check if we have a valid token
+    if (!token) return false
+    const statusRes = await fetch(`${API_BASE}/status`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+    return statusRes.ok
+  } catch { return false }
+}
+
+export const login = (token) => localStorage.setItem('mira_api_token', token)
+export const logout = () => {
+  localStorage.removeItem('mira_api_token')
+  window.location.href = '/login'
+}
+export const isLoggedIn = () => !!localStorage.getItem('mira_api_token')

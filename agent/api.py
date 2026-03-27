@@ -12,8 +12,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
 try:
@@ -26,7 +29,32 @@ from memory.sqlite_store import SQLiteStore
 
 logger = logging.getLogger("mira.api")
 
+
+class TokenAuthMiddleware(BaseHTTPMiddleware):
+    """Simple Bearer token auth for remote access."""
+
+    EXEMPT_PREFIXES = ("/api/health", "/api/setup/")
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        # Skip auth if no token configured, for non-API routes, or exempt paths
+        if not Config.API_TOKEN:
+            return await call_next(request)
+        if not path.startswith("/api/"):
+            return await call_next(request)
+        if any(path.startswith(p) for p in self.EXEMPT_PREFIXES):
+            return await call_next(request)
+
+        auth = request.headers.get("Authorization", "")
+        if auth == f"Bearer {Config.API_TOKEN}":
+            return await call_next(request)
+
+        return JSONResponse(status_code=401, content={"error": "Invalid or missing API token"})
+
+
 app = FastAPI(title="Mira Dashboard API", version="1.0.0")
+app.add_middleware(TokenAuthMiddleware)
 
 # Allow dashboard to connect from any origin (Tailscale network)
 app.add_middleware(
@@ -996,3 +1024,35 @@ def get_modules():
             "consulting": {"status": "pending", "phase": 9},
         },
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# HEALTH CHECK (no auth required)
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/health")
+async def health():
+    """Health check endpoint — no auth required."""
+    return {"status": "ok", "version": "1.0", "auth_required": bool(Config.API_TOKEN)}
+
+
+# ═══════════════════════════════════════════════════════════════
+# STATIC FILE SERVING (Dashboard)
+# Must be LAST — catch-all route for SPA
+# ═══════════════════════════════════════════════════════════════
+
+STATIC_DIR = Config.AGENT_DIR / "static"
+
+if STATIC_DIR.exists() and (STATIC_DIR / "index.html").exists():
+    # Serve built assets (JS/CSS bundles)
+    if (STATIC_DIR / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="static-assets")
+
+    @app.get("/{path:path}")
+    async def serve_spa(path: str):
+        """Serve the React dashboard. SPA catch-all for client-side routing."""
+        file_path = STATIC_DIR / path
+        if file_path.exists() and file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(STATIC_DIR / "index.html")

@@ -93,6 +93,11 @@ class Config:
     # ── Privacy ──────────────────────────────────────────────────────
     ENCRYPT_AT_REST = os.getenv("ENCRYPT_AT_REST", "true").lower() == "true"
 
+    # ── Web Access ────────────────────────────────────────────────
+    API_TOKEN = os.getenv("API_TOKEN", "")
+    WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
+    WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
+
     @classmethod
     def reload(cls):
         """Re-read all config values from os.environ (call after .env update)."""
@@ -120,6 +125,9 @@ class Config:
         cls.LOCAL_MODEL_NAME = os.getenv("LOCAL_MODEL_NAME", "phi3:mini")
         cls.LOCAL_MODEL_MAX_TOKENS = int(os.getenv("LOCAL_MODEL_MAX_TOKENS", "1024"))
         cls.LOCAL_MODEL_TIMEOUT = int(os.getenv("LOCAL_MODEL_TIMEOUT", "30"))
+        cls.API_TOKEN = os.getenv("API_TOKEN", "")
+        cls.WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
+        cls.WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
 
     @classmethod
     def ensure_dirs(cls):
