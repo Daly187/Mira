@@ -564,8 +564,23 @@ class Mira:
 
     async def process_message(self, text: str, source: str = "telegram") -> str:
         """Process an incoming message — think and respond, store in memory."""
+        # ── Intent detection: computer use actions ─────────────────────
+        cu_result = await self._try_computer_use_intent(text)
+        if cu_result:
+            return cu_result
+
         ingest_result = await self.ingest.ingest_text(text, source=source)
         context = self._build_context(text, ingest_result)
+
+        # Tell the brain it has computer use capabilities
+        if self.computer_use and self.computer_use.client:
+            context += (
+                "\n\nYou have ACTIVE computer use capabilities on this Windows desktop. "
+                "You can take screenshots, control mouse/keyboard, open apps, run commands, "
+                "and manage processes. When the user asks you to DO something on the computer, "
+                "tell them you're executing it — never say you can't."
+            )
+
         response = await self.brain.think(text, context=context)
 
         # Check for learning misconceptions and append correction if found
@@ -578,6 +593,106 @@ class Mira:
                 logger.debug(f"Misconception check skipped: {e}")
 
         return response
+
+    async def _try_computer_use_intent(self, text: str) -> str | None:
+        """Detect if the message is a computer use request and execute it.
+
+        Returns a response string if handled, None if it's a normal message.
+        """
+        if not self.computer_use or not self.computer_use.client:
+            return None
+        if self.paused:
+            return None
+
+        lower = text.lower().strip()
+
+        # ── Screenshot requests ────────────────────────────────────────
+        screenshot_triggers = [
+            "screenshot", "screen shot", "send me a screenshot",
+            "show me the screen", "what's on the screen", "what's on screen",
+            "whats on the screen", "capture the screen", "take a screenshot",
+            "show me your screen", "show the screen", "show screen",
+            "what do you see", "what can you see on the screen",
+            "send me the screen", "grab the screen",
+        ]
+        if any(trigger in lower for trigger in screenshot_triggers):
+            path = await self.computer_use.screenshot_to_file()
+            if path and self.telegram:
+                import os
+                try:
+                    with open(path, "rb") as photo:
+                        await self.telegram.app.bot.send_photo(
+                            chat_id=self.telegram.chat_id, photo=photo,
+                            caption="Here's what's on the screen right now."
+                        )
+                    # Also do a quick analysis
+                    analysis = await self.computer_use.analyse_screen(
+                        task="Briefly describe what's visible on screen."
+                    )
+                    return f"Screenshot sent. {analysis[:500]}"
+                except Exception as e:
+                    logger.error(f"Screenshot send failed: {e}")
+                    return f"Captured the screen but failed to send: {e}"
+                finally:
+                    if os.path.exists(path):
+                        os.remove(path)
+            return "Failed to capture screenshot."
+
+        # ── Open app requests ──────────────────────────────────────────
+        open_patterns = [
+            "open ", "launch ", "start ", "run ",
+        ]
+        for pattern in open_patterns:
+            if lower.startswith(pattern):
+                app_name = text[len(pattern):].strip()
+                if app_name and len(app_name) < 50:
+                    from computer_use.actions import ComputerActions
+                    actions = ComputerActions(self.computer_use)
+                    try:
+                        result = await actions.open_application(app_name)
+                        self.sqlite.log_action("computer_use", f"open: {app_name}", "success")
+                        return f"Opened {app_name}."
+                    except Exception as e:
+                        return f"Failed to open {app_name}: {e}"
+
+        # ── General computer use tasks (AI-driven) ─────────────────────
+        action_triggers = [
+            "click ", "type ", "close ", "minimize ", "go to ",
+            "navigate to ", "search for ", "find the ",
+            "switch to ", "drag ", "scroll ",
+        ]
+        if any(lower.startswith(t) for t in action_triggers):
+            try:
+                result = await self.computer_use.execute_task(text, max_steps=10)
+                status = result.get("status", "unknown")
+                summary = ""
+                for step in reversed(result.get("steps", [])):
+                    if step.get("summary"):
+                        summary = step["summary"][:500]
+                        break
+
+                # Send final screenshot
+                path = await self.computer_use.screenshot_to_file()
+                if path and self.telegram:
+                    import os
+                    try:
+                        with open(path, "rb") as photo:
+                            await self.telegram.app.bot.send_photo(
+                                chat_id=self.telegram.chat_id, photo=photo,
+                                caption=f"Done. {summary[:200]}" if summary else "Task executed."
+                            )
+                    finally:
+                        if os.path.exists(path):
+                            os.remove(path)
+
+                msg = f"Status: {status}"
+                if summary:
+                    msg += f"\n{summary}"
+                return msg
+            except Exception as e:
+                return f"Task failed: {e}"
+
+        return None
 
     def _build_context(self, message: str, ingest_result: dict) -> str:
         """Build context from memory for the brain to use."""

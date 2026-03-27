@@ -97,8 +97,22 @@ class MiraTelegramBot:
         self.app.add_handler(CommandHandler("negotiate", self._cmd_negotiate))
         self.app.add_handler(CommandHandler("contract", self._cmd_contract))
 
+        # ── Computer Use Commands ──────────────────────────────────────
+        self.app.add_handler(CommandHandler("do", self._cmd_do))
+        self.app.add_handler(CommandHandler("screen", self._cmd_screen))
+        self.app.add_handler(CommandHandler("open", self._cmd_open))
+        self.app.add_handler(CommandHandler("windows", self._cmd_windows))
+        self.app.add_handler(CommandHandler("run", self._cmd_run))
+        self.app.add_handler(CommandHandler("clipboard", self._cmd_clipboard))
+        self.app.add_handler(CommandHandler("processes", self._cmd_processes))
+
         # ── Draft Approval (inline keyboard callbacks) ───────────────
         self.app.add_handler(CallbackQueryHandler(self._handle_draft_callback))
+
+        # ── Photo handler (OCR + memory ingestion) ────────────────────
+        self.app.add_handler(
+            MessageHandler(filters.PHOTO, self._handle_photo_message)
+        )
 
         # ── Voice message handler ──────────────────────────────────────
         self.app.add_handler(
@@ -284,6 +298,14 @@ class MiraTelegramBot:
             "NEGOTIATION\n"
             "/negotiate [counterparty] — Prepare negotiation brief\n"
             "/contract [text] — Review a contract or legal text\n\n"
+            "COMPUTER USE\n"
+            "/do [task] — Execute a desktop task (AI-driven)\n"
+            "/screen [question] — Screenshot (+ AI analysis)\n"
+            "/open [app] — Launch an application\n"
+            "/windows [title] — List or focus windows\n"
+            "/run [cmd] — Run a shell command\n"
+            "/clipboard [text] — Read or set clipboard\n"
+            "/processes [name] — List running processes\n\n"
             "COST\n"
             "/cost — API cost breakdown (today/week/month)"
         )
@@ -574,6 +596,232 @@ class MiraTelegramBot:
             await update.message.reply_text(f"Contract review failed: {e}")
 
     # ══════════════════════════════════════════════════════════════════
+    # COMPUTER USE COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_do(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Execute a computer use task described in natural language."""
+        task = " ".join(context.args) if context.args else ""
+        if not task:
+            await update.message.reply_text(
+                "Usage: /do [task]\n\n"
+                "Examples:\n"
+                "  /do open Chrome and go to google.com\n"
+                "  /do take a screenshot of MetaTrader\n"
+                "  /do close the Notepad window"
+            )
+            return
+
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu or not cu.client:
+            await update.message.reply_text("Computer use not available. Check pyautogui + Anthropic API.")
+            return
+
+        if self.mira.paused:
+            await update.message.reply_text("Kill switch active — computer use blocked.")
+            return
+
+        await update.message.reply_text(f"Executing: {task[:100]}...")
+        try:
+            result = await cu.execute_task(task, max_steps=10)
+            status = result.get("status", "unknown")
+            steps = result.get("steps_taken", 0)
+            msg = f"Task: {task[:80]}\nStatus: {status}\nSteps: {steps}"
+
+            # Include last step summary if completed
+            for step in reversed(result.get("steps", [])):
+                if step.get("summary"):
+                    msg += f"\n\nResult: {step['summary'][:500]}"
+                    break
+
+            await update.message.reply_text(msg)
+
+            # Send a screenshot of the final state
+            screenshot_path = await cu.screenshot_to_file()
+            if screenshot_path:
+                try:
+                    with open(screenshot_path, "rb") as photo:
+                        await self.app.bot.send_photo(
+                            chat_id=update.effective_chat.id, photo=photo,
+                            caption="Screen after task"
+                        )
+                finally:
+                    import os
+                    if os.path.exists(screenshot_path):
+                        os.remove(screenshot_path)
+
+        except Exception as e:
+            logger.error(f"/do command failed: {e}")
+            await update.message.reply_text(f"Task failed: {e}")
+
+    async def _cmd_screen(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Take a screenshot and send it, optionally with AI analysis."""
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu:
+            await update.message.reply_text("Computer use not available.")
+            return
+
+        question = " ".join(context.args) if context.args else None
+
+        # Send screenshot as photo
+        screenshot_path = await cu.screenshot_to_file()
+        if not screenshot_path:
+            await update.message.reply_text("Failed to capture screenshot.")
+            return
+
+        try:
+            with open(screenshot_path, "rb") as photo:
+                await self.app.bot.send_photo(
+                    chat_id=update.effective_chat.id, photo=photo,
+                    caption="Current screen"
+                )
+        finally:
+            import os
+            if os.path.exists(screenshot_path):
+                os.remove(screenshot_path)
+
+        # If a question was asked, analyse the screen
+        if question and cu.client:
+            await update.message.reply_text(f"Analysing: {question[:100]}...")
+            analysis = await cu.analyse_screen(task=question)
+            await update.message.reply_text(analysis[:4000])
+
+    async def _cmd_open(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Open an application by name."""
+        app_name = " ".join(context.args) if context.args else ""
+        if not app_name:
+            await update.message.reply_text(
+                "Usage: /open [app name]\n\n"
+                "Examples: /open Chrome, /open MetaTrader 5, /open Excel, /open explorer"
+            )
+            return
+
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu:
+            await update.message.reply_text("Computer use not available.")
+            return
+
+        if self.mira.paused:
+            await update.message.reply_text("Kill switch active — computer use blocked.")
+            return
+
+        try:
+            from computer_use.actions import ComputerActions
+            actions = ComputerActions(cu)
+            result = await actions.open_application(app_name)
+            await update.message.reply_text(f"Opened {app_name} ({result.get('method', 'unknown')})")
+            self.mira.sqlite.log_action("computer_use", f"open: {app_name}", "success")
+        except Exception as e:
+            logger.error(f"/open failed: {e}")
+            await update.message.reply_text(f"Failed to open {app_name}: {e}")
+
+    async def _cmd_windows(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """List all open windows or focus one."""
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu:
+            await update.message.reply_text("Computer use not available.")
+            return
+
+        focus_target = " ".join(context.args) if context.args else ""
+
+        if focus_target:
+            # Focus a specific window
+            result = await cu.focus_window(focus_target)
+            if result:
+                await update.message.reply_text(f"Focused window matching: {focus_target}")
+            else:
+                await update.message.reply_text(f"No window found matching: {focus_target}")
+            return
+
+        # List all windows
+        windows = await cu.list_windows()
+        if not windows:
+            await update.message.reply_text("No windows found (or detection not available).")
+            return
+
+        msg = f"Open Windows ({len(windows)}):\n\n"
+        for i, w in enumerate(windows[:30], 1):
+            msg += f"  {i}. {w['title'][:60]}\n"
+        if len(windows) > 30:
+            msg += f"\n  ... and {len(windows) - 30} more"
+        msg += "\n\nUsage: /windows [title] to focus a window"
+        await update.message.reply_text(msg)
+
+    async def _cmd_run(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Run a shell command on the desktop."""
+        command = " ".join(context.args) if context.args else ""
+        if not command:
+            await update.message.reply_text("Usage: /run [command]\nExample: /run dir C:\\Users")
+            return
+
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu:
+            await update.message.reply_text("Computer use not available.")
+            return
+
+        if self.mira.paused:
+            await update.message.reply_text("Kill switch active — command execution blocked.")
+            return
+
+        result = await cu.run_command(command)
+        status = result.get("status", "unknown")
+        stdout = result.get("stdout", "")[:3500]
+        stderr = result.get("stderr", "")[:500]
+
+        msg = f"Command: {command[:100]}\nStatus: {status}"
+        if stdout:
+            msg += f"\n\nOutput:\n{stdout}"
+        if stderr:
+            msg += f"\n\nErrors:\n{stderr}"
+        await update.message.reply_text(msg[:4000])
+
+    async def _cmd_clipboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Read or set the clipboard."""
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu:
+            await update.message.reply_text("Computer use not available.")
+            return
+
+        text = " ".join(context.args) if context.args else ""
+
+        if text:
+            # Set clipboard
+            ok = await cu.set_clipboard(text)
+            if ok:
+                await update.message.reply_text(f"Clipboard set: {text[:100]}")
+            else:
+                await update.message.reply_text("Failed to set clipboard.")
+        else:
+            # Read clipboard
+            content = await cu.get_clipboard()
+            if content:
+                await update.message.reply_text(f"Clipboard contents:\n\n{content[:3000]}")
+            else:
+                await update.message.reply_text("Clipboard is empty.")
+
+    async def _cmd_processes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """List running processes, optionally filtered."""
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu:
+            await update.message.reply_text("Computer use not available.")
+            return
+
+        filter_name = " ".join(context.args) if context.args else None
+        processes = await cu.list_processes(filter_name=filter_name)
+
+        if not processes:
+            await update.message.reply_text("No processes found.")
+            return
+
+        label = f' matching "{filter_name}"' if filter_name else ''
+        msg = f"Processes{label} ({len(processes)}):\n\n"
+        for p in processes[:40]:
+            msg += f"  {p['name']} (PID {p['pid']}) — {p.get('memory', '?')}\n"
+        if len(processes) > 40:
+            msg += f"\n  ... and {len(processes) - 40} more"
+        await update.message.reply_text(msg[:4000])
+
+    # ══════════════════════════════════════════════════════════════════
     # DRAFT APPROVAL (inline keyboards)
     # ══════════════════════════════════════════════════════════════════
 
@@ -694,6 +942,90 @@ class MiraTelegramBot:
             return f"Queued for {platform}. (Social posting in Phase 8)"
 
         return "Draft accepted. Execution handler not yet implemented for this type."
+
+    # ══════════════════════════════════════════════════════════════════
+    # PHOTO HANDLER
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _handle_photo_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle photos sent to Mira — OCR + ingest to memory."""
+        caption = update.message.caption or ""
+        logger.info(f"Photo received with caption: {caption[:80]}")
+
+        # Download the highest-resolution photo
+        photo = update.message.photo[-1]  # largest size
+        file = await photo.get_file()
+
+        tmp_path = None
+        try:
+            tmp_path = os.path.join(tempfile.gettempdir(), f"mira_photo_{photo.file_id}.jpg")
+            await file.download_to_drive(tmp_path)
+
+            # Process through ingestion (OCR + memory)
+            if hasattr(self.mira, "ingest"):
+                await update.message.reply_text("Processing image...")
+                result = await self.mira.ingest.ingest_image(tmp_path, caption=caption, source="telegram_photo")
+                await update.message.reply_text(
+                    f"Image processed.\n"
+                    f"Text extracted: {len(result.get('text', ''))} chars\n"
+                    f"Memory ID: {result.get('memory_id', 'N/A')}"
+                )
+            else:
+                await update.message.reply_text("Image received but ingestion module not available.")
+        except Exception as e:
+            logger.error(f"Photo processing failed: {e}")
+            await update.message.reply_text(f"Failed to process image: {e}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    # ══════════════════════════════════════════════════════════════════
+    # VOICE HANDLER
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle voice messages — transcribe with Whisper and process."""
+        voice = getattr(self.mira, "voice", None)
+        if not voice:
+            await update.message.reply_text("Voice processing not available (Whisper not loaded).")
+            return
+
+        voice_file = update.message.voice or update.message.audio
+        if not voice_file:
+            return
+
+        tmp_path = None
+        try:
+            file = await voice_file.get_file()
+            tmp_path = os.path.join(tempfile.gettempdir(), f"mira_voice_{voice_file.file_id}.ogg")
+            await file.download_to_drive(tmp_path)
+
+            await update.message.reply_text("Transcribing...")
+            transcript = await voice.transcribe(tmp_path)
+
+            if not transcript:
+                await update.message.reply_text("Could not transcribe the voice message.")
+                return
+
+            await update.message.reply_text(f"Heard: {transcript[:500]}")
+
+            # Process the transcript as a regular message
+            if not self.mira.paused:
+                response = await self.mira.process_message(transcript, source="telegram_voice")
+                await update.message.reply_text(response)
+
+        except Exception as e:
+            logger.error(f"Voice processing failed: {e}")
+            await update.message.reply_text(f"Voice processing failed: {e}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     # ══════════════════════════════════════════════════════════════════
     # MESSAGE HANDLER

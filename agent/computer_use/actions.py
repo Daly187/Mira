@@ -211,7 +211,7 @@ class ComputerActions:
 
         try:
             response = self.agent.client.messages.create(
-                model="claude-sonnet-4-5-20250514",
+                model="claude-sonnet-4-5-20250929",
                 max_tokens=2048,
                 messages=[{
                     "role": "user",
@@ -276,7 +276,7 @@ class ComputerActions:
 
             try:
                 response = self.agent.client.messages.create(
-                    model="claude-sonnet-4-5-20250514",
+                    model="claude-sonnet-4-5-20250929",
                     max_tokens=256,
                     messages=[{
                         "role": "user",
@@ -345,7 +345,7 @@ class ComputerActions:
 
         try:
             response = self.agent.client.messages.create(
-                model="claude-sonnet-4-5-20250514",
+                model="claude-sonnet-4-5-20250929",
                 max_tokens=256,
                 messages=[{
                     "role": "user",

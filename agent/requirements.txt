@@ -17,6 +17,7 @@ openai-whisper>=20231117
 # Phase 5: Computer use
 Pillow>=10.0.0
 pyautogui>=0.9.54
+pyperclip>=1.8.0
 
 # Phase 6: PA module
 google-api-python-client>=2.100.0

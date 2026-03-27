@@ -7,10 +7,37 @@ This is the execution layer. The brain decides what to do, this module does it.
 
 import base64
 import logging
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("mira.computer_use")
+
+
+def _detect_screen_resolution() -> tuple[int, int]:
+    """Auto-detect the primary monitor resolution."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            user32 = ctypes.windll.user32
+            user32.SetProcessDPIAware()
+            return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+        elif sys.platform == "darwin":
+            from PIL import ImageGrab
+            img = ImageGrab.grab()
+            return img.size
+        else:
+            # Linux fallback
+            output = subprocess.check_output(["xrandr"]).decode()
+            for line in output.splitlines():
+                if "*" in line:
+                    res = line.split()[0]
+                    w, h = res.split("x")
+                    return int(w), int(h)
+    except Exception as e:
+        logger.warning(f"Screen resolution detection failed: {e}")
+    return 1920, 1080  # fallback
 
 
 class ComputerUseAgent:
@@ -19,8 +46,8 @@ class ComputerUseAgent:
     def __init__(self, mira):
         self.mira = mira
         self.client = None
-        self.screen_width = 1920
-        self.screen_height = 1080
+        self.screen_width, self.screen_height = _detect_screen_resolution()
+        self._confirmation_required = True  # require Telegram approval for actions
 
     def initialise(self):
         """Set up the computer use client."""
@@ -28,7 +55,10 @@ class ComputerUseAgent:
             import anthropic
             from config import Config
             self.client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-            logger.info("Computer use agent initialised.")
+            logger.info(
+                f"Computer use agent initialised. "
+                f"Screen: {self.screen_width}x{self.screen_height}"
+            )
         except Exception as e:
             logger.error(f"Failed to initialise computer use: {e}")
 
@@ -113,7 +143,7 @@ class ComputerUseAgent:
 
                 # Step 3: Send to Claude with computer use tool
                 response = self.client.messages.create(
-                    model="claude-sonnet-4-5-20250514",
+                    model="claude-sonnet-4-5-20250929",
                     max_tokens=1024,
                     system="You are a computer use agent. You can see the screen and perform "
                            "actions using the computer tool. Execute the user's task step by step. "
@@ -334,7 +364,7 @@ class ComputerUseAgent:
 
         try:
             response = self.client.messages.create(
-                model="claude-sonnet-4-5-20250514",
+                model="claude-sonnet-4-5-20250929",
                 max_tokens=1024,
                 messages=[{
                     "role": "user",
@@ -355,3 +385,256 @@ class ComputerUseAgent:
         except Exception as e:
             logger.error(f"Screen analysis failed: {e}")
             return f"Analysis failed: {e}"
+
+    # ── Screenshot to file (for Telegram sending) ──────────────────────
+
+    async def screenshot_to_file(self, path: str = None) -> Optional[str]:
+        """Save a screenshot to a file. Returns the file path."""
+        try:
+            from PIL import ImageGrab
+            import tempfile
+
+            if not path:
+                fd, path = tempfile.mkstemp(suffix=".png", prefix="mira_screen_")
+                import os
+                os.close(fd)
+
+            screenshot = ImageGrab.grab()
+            screenshot.save(path, format="PNG")
+            logger.debug(f"Screenshot saved to {path}")
+            return path
+        except Exception as e:
+            logger.error(f"Screenshot to file failed: {e}")
+            return None
+
+    # ── Process Management ─────────────────────────────────────────────
+
+    async def list_processes(self, filter_name: str = None) -> list[dict]:
+        """List running processes. Optionally filter by name."""
+        try:
+            if sys.platform == "win32":
+                cmd = ["tasklist", "/fo", "csv", "/nh"]
+                output = subprocess.check_output(cmd, text=True, timeout=10)
+                processes = []
+                for line in output.strip().splitlines():
+                    parts = line.strip('"').split('","')
+                    if len(parts) >= 5:
+                        name, pid, session, session_num, mem = parts[:5]
+                        if filter_name and filter_name.lower() not in name.lower():
+                            continue
+                        processes.append({
+                            "name": name,
+                            "pid": int(pid),
+                            "memory": mem.strip('"'),
+                        })
+                return processes
+            else:
+                import psutil
+                processes = []
+                for proc in psutil.process_iter(["pid", "name", "memory_info"]):
+                    info = proc.info
+                    if filter_name and filter_name.lower() not in info["name"].lower():
+                        continue
+                    mem = info.get("memory_info")
+                    processes.append({
+                        "name": info["name"],
+                        "pid": info["pid"],
+                        "memory": f"{mem.rss // 1024 // 1024} MB" if mem else "?",
+                    })
+                return processes
+        except Exception as e:
+            logger.error(f"List processes failed: {e}")
+            return []
+
+    async def kill_process(self, pid: int = None, name: str = None) -> str:
+        """Kill a process by PID or name. Returns result string."""
+        try:
+            if pid:
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/pid", str(pid), "/f"],
+                                   check=True, timeout=10)
+                else:
+                    import signal
+                    import os
+                    os.kill(pid, signal.SIGTERM)
+                self.mira.sqlite.log_action(
+                    "computer_use", "kill_process", f"killed PID {pid}"
+                )
+                return f"Process {pid} terminated."
+            elif name:
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/im", name, "/f"],
+                                   check=True, timeout=10)
+                else:
+                    subprocess.run(["pkill", "-f", name],
+                                   check=True, timeout=10)
+                self.mira.sqlite.log_action(
+                    "computer_use", "kill_process", f"killed '{name}'"
+                )
+                return f"Process '{name}' terminated."
+            return "Provide a pid or name."
+        except Exception as e:
+            logger.error(f"Kill process failed: {e}")
+            return f"Failed: {e}"
+
+    # ── Clipboard ──────────────────────────────────────────────────────
+
+    async def get_clipboard(self) -> str:
+        """Read the current clipboard text content."""
+        try:
+            import pyperclip
+            return pyperclip.paste()
+        except ImportError:
+            # Fallback for Windows without pyperclip
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    from ctypes import wintypes
+                    CF_UNICODETEXT = 13
+                    user32 = ctypes.windll.user32
+                    kernel32 = ctypes.windll.kernel32
+                    user32.OpenClipboard(0)
+                    handle = user32.GetClipboardData(CF_UNICODETEXT)
+                    if handle:
+                        kernel32.GlobalLock.restype = ctypes.c_wchar_p
+                        data = kernel32.GlobalLock(handle)
+                        kernel32.GlobalUnlock(handle)
+                        user32.CloseClipboard()
+                        return data or ""
+                    user32.CloseClipboard()
+                except Exception:
+                    pass
+            return ""
+        except Exception as e:
+            logger.error(f"Clipboard read failed: {e}")
+            return ""
+
+    async def set_clipboard(self, text: str) -> bool:
+        """Set the clipboard text content."""
+        try:
+            import pyperclip
+            pyperclip.copy(text)
+            return True
+        except ImportError:
+            if sys.platform == "win32":
+                try:
+                    subprocess.run(
+                        ["powershell", "-command", f"Set-Clipboard -Value '{text}'"],
+                        timeout=5,
+                    )
+                    return True
+                except Exception:
+                    pass
+            return False
+        except Exception as e:
+            logger.error(f"Clipboard write failed: {e}")
+            return False
+
+    # ── File Operations ────────────────────────────────────────────────
+
+    async def run_command(self, command: str, timeout: int = 30) -> dict:
+        """Run a shell command and return stdout/stderr.
+
+        Only runs if Mira is not paused. Logs the action.
+        """
+        if self.mira.paused:
+            return {"status": "blocked", "message": "Kill switch is active"}
+
+        logger.info(f"Running command: {command[:100]}")
+        self.mira.sqlite.log_action(
+            "computer_use", "run_command", command[:200]
+        )
+
+        try:
+            if sys.platform == "win32":
+                result = subprocess.run(
+                    command, shell=True, capture_output=True, text=True,
+                    timeout=timeout,
+                )
+            else:
+                result = subprocess.run(
+                    command, shell=True, capture_output=True, text=True,
+                    timeout=timeout,
+                )
+            return {
+                "status": "success" if result.returncode == 0 else "error",
+                "returncode": result.returncode,
+                "stdout": result.stdout[-2000:] if result.stdout else "",
+                "stderr": result.stderr[-1000:] if result.stderr else "",
+            }
+        except subprocess.TimeoutExpired:
+            return {"status": "timeout", "message": f"Command timed out after {timeout}s"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    # ── Window Management ──────────────────────────────────────────────
+
+    async def list_windows(self) -> list[dict]:
+        """List all visible windows with titles."""
+        windows = []
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                from ctypes import wintypes
+
+                EnumWindows = ctypes.windll.user32.EnumWindows
+                GetWindowTextW = ctypes.windll.user32.GetWindowTextW
+                IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+                GetWindowTextLengthW = ctypes.windll.user32.GetWindowTextLengthW
+
+                WNDENUMPROC = ctypes.WINFUNCTYPE(
+                    wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+                )
+
+                def callback(hwnd, lParam):
+                    if IsWindowVisible(hwnd):
+                        length = GetWindowTextLengthW(hwnd)
+                        if length > 0:
+                            buf = ctypes.create_unicode_buffer(length + 1)
+                            GetWindowTextW(hwnd, buf, length + 1)
+                            title = buf.value
+                            if title.strip():
+                                windows.append({
+                                    "hwnd": hwnd,
+                                    "title": title,
+                                })
+                    return True
+
+                EnumWindows(WNDENUMPROC(callback), 0)
+            else:
+                # macOS/Linux — basic fallback
+                output = subprocess.check_output(
+                    ["wmctrl", "-l"], text=True, timeout=5
+                ).strip()
+                for line in output.splitlines():
+                    parts = line.split(None, 3)
+                    if len(parts) >= 4:
+                        windows.append({"title": parts[3]})
+        except Exception as e:
+            logger.warning(f"List windows failed: {e}")
+
+        return windows
+
+    async def focus_window(self, title_substring: str) -> bool:
+        """Bring a window to the foreground by partial title match."""
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                from ctypes import wintypes
+
+                windows = await self.list_windows()
+                for w in windows:
+                    if title_substring.lower() in w["title"].lower():
+                        hwnd = w["hwnd"]
+                        ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                        ctypes.windll.user32.SetForegroundWindow(hwnd)
+                        logger.info(f"Focused window: {w['title']}")
+                        return True
+            else:
+                subprocess.run(
+                    ["wmctrl", "-a", title_substring], timeout=5
+                )
+                return True
+        except Exception as e:
+            logger.error(f"Focus window failed: {e}")
+        return False
