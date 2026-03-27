@@ -651,14 +651,15 @@ class Mira:
                         os.remove(path)
             return "Failed to capture screenshot."
 
-        # ── Open app requests ──────────────────────────────────────────
+        # ── Simple open-app requests (e.g. "open chrome") ────────────
         open_patterns = [
             "open ", "launch ", "start ", "run ",
         ]
         for pattern in open_patterns:
             if lower.startswith(pattern):
                 app_name = text[len(pattern):].strip()
-                if app_name and len(app_name) < 50:
+                # Simple app name (<50 chars, no "and"/"then" = just open it)
+                if app_name and len(app_name) < 50 and " and " not in app_name.lower():
                     from computer_use.actions import ComputerActions
                     actions = ComputerActions(self.computer_use)
                     try:
@@ -667,45 +668,84 @@ class Mira:
                         return f"Opened {app_name}."
                     except Exception as e:
                         return f"Failed to open {app_name}: {e}"
+                # Complex request starting with "open" (e.g. "open MT5 and install the EA")
+                # Falls through to AI-driven execution below
 
-        # ── General computer use tasks (AI-driven) ─────────────────────
-        action_triggers = [
+        # ── AI-driven computer use (multi-step tasks) ─────────────────
+        # Triggers at START of message (direct commands)
+        action_start_triggers = [
             "click ", "type ", "close ", "minimize ", "go to ",
             "navigate to ", "search for ", "find the ",
             "switch to ", "drag ", "scroll ",
         ]
-        if any(lower.startswith(t) for t in action_triggers):
-            try:
-                result = await self.computer_use.execute_task(text, max_steps=10)
-                status = result.get("status", "unknown")
-                summary = ""
-                for step in reversed(result.get("steps", [])):
-                    if step.get("summary"):
-                        summary = step["summary"][:500]
-                        break
+        # Triggers ANYWHERE in message (implied computer actions)
+        action_contains_triggers = [
+            "open ", "launch ", "install ", "download ",
+            "on the desktop", "on the screen", "on my computer",
+            "on the computer", "on my pc", "on my laptop",
+            "on my device", "on the windows", "on this machine",
+            "in metatrader", "in mt5", "in mt4", "in chrome",
+            "in the browser", "in excel", "in word",
+            "right click", "right-click", "double click", "double-click",
+            "copy and paste", "drag and drop",
+            "press ", "hit ", "ctrl+", "alt+",
+        ]
 
-                # Send final screenshot
-                path = await self.computer_use.screenshot_to_file()
-                if path and self.telegram:
-                    import os
-                    try:
-                        with open(path, "rb") as photo:
-                            await self.telegram.app.bot.send_photo(
-                                chat_id=self.telegram.chat_id, photo=photo,
-                                caption=f"Done. {summary[:200]}" if summary else "Task executed."
-                            )
-                    finally:
-                        if os.path.exists(path):
-                            os.remove(path)
+        is_computer_task = (
+            any(lower.startswith(t) for t in action_start_triggers)
+            or any(t in lower for t in action_contains_triggers)
+        )
 
-                msg = f"Status: {status}"
-                if summary:
-                    msg += f"\n{summary}"
-                return msg
-            except Exception as e:
-                return f"Task failed: {e}"
+        if is_computer_task:
+            return await self._execute_computer_task(text)
 
         return None
+
+    async def _execute_computer_task(self, text: str) -> str:
+        """Execute a multi-step AI-driven computer use task."""
+        try:
+            # Notify user we're working on it
+            if self.telegram:
+                try:
+                    await self.telegram.app.bot.send_message(
+                        chat_id=self.telegram.chat_id,
+                        text="On it. Executing now..."
+                    )
+                except Exception:
+                    pass
+
+            result = await self.computer_use.execute_task(text, max_steps=15)
+            status = result.get("status", "unknown")
+            summary = ""
+            for step in reversed(result.get("steps", [])):
+                if step.get("summary"):
+                    summary = step["summary"][:500]
+                    break
+
+            # Send final screenshot showing what happened
+            path = await self.computer_use.screenshot_to_file()
+            if path and self.telegram:
+                import os
+                try:
+                    caption = f"Done. {summary[:200]}" if summary else "Task executed."
+                    if status != "completed":
+                        caption = f"Stopped after {result.get('steps_taken', '?')} steps. {summary[:150]}"
+                    with open(path, "rb") as photo:
+                        await self.telegram.app.bot.send_photo(
+                            chat_id=self.telegram.chat_id, photo=photo,
+                            caption=caption
+                        )
+                finally:
+                    if os.path.exists(path):
+                        os.remove(path)
+
+            msg = f"Status: {status}"
+            if summary:
+                msg += f"\n{summary}"
+            return msg
+        except Exception as e:
+            logger.error(f"Computer task failed: {e}")
+            return f"Task failed: {e}"
 
     def _build_context(self, message: str, ingest_result: dict) -> str:
         """Build context from memory for the brain to use."""
