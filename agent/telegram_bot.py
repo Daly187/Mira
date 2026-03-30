@@ -93,6 +93,12 @@ class MiraTelegramBot:
         # ── Research Commands ────────────────────────────────────────
         self.app.add_handler(CommandHandler("research", self._cmd_research))
 
+        # ── Gift Commands ────────────────────────────────────────────
+        self.app.add_handler(CommandHandler("gift", self._cmd_gift))
+
+        # ── Meeting Analysis Commands ────────────────────────────────
+        self.app.add_handler(CommandHandler("meetings", self._cmd_meetings))
+
         # ── Capture Commands ─────────────────────────────────────────
         self.app.add_handler(CommandHandler("pause_listen", self._cmd_pause_listen))
 
@@ -330,6 +336,10 @@ class MiraTelegramBot:
             "/networth — Current net worth snapshot\n\n"
             "RESEARCH\n"
             "/research [topic] — Run deep research\n\n"
+            "GIFTS\n"
+            "/gift [person] — Personalised gift suggestions\n\n"
+            "MEETINGS\n"
+            "/meetings — Analyse 4-week meeting patterns\n\n"
             "CAPTURE\n"
             "/pause_listen — Pause audio capture for 30 min\n\n"
             "HABITS\n"
@@ -780,6 +790,62 @@ class MiraTelegramBot:
 
     async def _cmd_pause_listen(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Audio capture paused for 30 minutes. (Phase 4)")
+
+    # ══════════════════════════════════════════════════════════════════
+    # GIFT COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_gift(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Generate personalised gift suggestions for a person."""
+        name = " ".join(context.args) if context.args else ""
+        if not name:
+            await update.message.reply_text(
+                "Usage: /gift [person name]\n\n"
+                "Generates personalised gift ideas based on everything "
+                "Mira knows about that person."
+            )
+            return
+
+        personal = getattr(self.mira, "personal", None)
+        if not personal:
+            await update.message.reply_text("Personal module not available.")
+            return
+
+        await update.message.reply_text(f"Thinking about gifts for {name}...")
+
+        try:
+            suggestions = await personal.suggest_gift(name)
+            await update.message.reply_text(f"Gift Ideas for {name}\n\n{suggestions[:4000]}")
+        except Exception as e:
+            logger.error(f"Gift suggestion failed: {e}")
+            await update.message.reply_text(f"Could not generate gift suggestions: {e}")
+
+    # ══════════════════════════════════════════════════════════════════
+    # MEETING ANALYSIS COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_meetings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Analyse meeting patterns over the last 4 weeks."""
+        pa = getattr(self.mira, "pa", None)
+        if not pa:
+            await update.message.reply_text("PA module not available.")
+            return
+
+        await update.message.reply_text("Analysing 4 weeks of meeting data...")
+
+        try:
+            analysis = await pa.analyse_meeting_patterns()
+            # Split if too long
+            if len(analysis) > 4000:
+                parts = [analysis[i:i+4000] for i in range(0, len(analysis), 4000)]
+                for i, part in enumerate(parts):
+                    prefix = f"Meeting Analysis ({i+1}/{len(parts)})\n\n" if i == 0 else ""
+                    await update.message.reply_text(f"{prefix}{part}")
+            else:
+                await update.message.reply_text(f"Meeting Analysis\n\n{analysis}")
+        except Exception as e:
+            logger.error(f"Meeting analysis failed: {e}")
+            await update.message.reply_text(f"Could not analyse meetings: {e}")
 
     # ══════════════════════════════════════════════════════════════════
     # HABIT COMMANDS

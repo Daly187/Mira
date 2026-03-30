@@ -290,6 +290,104 @@ Write ONLY the post text. No explanations or meta-commentary."""
         return {"followers": 0, "engagement_rate": 0, "posts_this_week": 0}
 
     async def handle_engagement(self, platform: str, interaction: dict) -> Optional[str]:
-        """Handle replies, comments — auto-respond to up to 50%."""
-        # Phase 8: AI-powered community engagement
-        return None
+        """Handle replies, comments — auto-respond to up to ~50%.
+
+        Decision logic:
+        1. Skip interactions from bots or spam accounts
+        2. Always respond to direct questions
+        3. Respond to positive/constructive comments ~50% of the time
+        4. Never respond to toxic/trolling content (just log it)
+        5. Escalate high-value interactions (influencers, clients) to Telegram
+
+        Args:
+            platform: Platform name (x, linkedin, instagram, etc.)
+            interaction: Dict with type, author, content, followers, is_question, etc.
+
+        Returns:
+            Reply text, or None if no reply needed.
+        """
+        author = interaction.get("author", "unknown")
+        content = interaction.get("content", "")
+        interaction_type = interaction.get("type", "comment")  # comment, reply, mention
+        followers = interaction.get("followers", 0)
+        is_question = interaction.get("is_question", False)
+
+        if not content.strip():
+            return None
+
+        # 1. Skip likely bots/spam
+        spam_signals = ["follow me", "check my bio", "dm me", "giveaway", "click here"]
+        if any(s in content.lower() for s in spam_signals):
+            self.mira.sqlite.log_action("social", "engagement_skip", f"spam: {author}")
+            return None
+
+        # 2. Always respond to direct questions
+        # 3. Respond to ~50% of others (use hash for deterministic selection)
+        should_respond = is_question or "?" in content
+        if not should_respond:
+            # Deterministic 50% — hash author + content for consistency
+            hash_val = hash(f"{author}{content[:50]}") % 100
+            should_respond = hash_val < 50
+
+        if not should_respond:
+            return None
+
+        # 4. Check for toxic content
+        toxic_words = ["idiot", "scam", "fraud", "stupid", "loser"]
+        if any(w in content.lower() for w in toxic_words):
+            self.mira.sqlite.log_action(
+                "social", "engagement_skip", f"toxic: {author}: {content[:60]}"
+            )
+            return None
+
+        # 5. High-value interaction — escalate
+        if followers and followers > 10000:
+            if hasattr(self.mira, "telegram"):
+                await self.mira.telegram.notify(
+                    "social",
+                    f"High-value engagement on {platform}",
+                    f"@{author} ({followers} followers): {content[:200]}",
+                )
+
+        # Generate reply using brain
+        platform_config = PLATFORM_CONFIG.get(platform, {})
+        max_len = platform_config.get("max_length", 280)
+
+        prompt = f"""Generate a reply to this {platform} {interaction_type}.
+
+Original post context: {interaction.get('original_post', '')[:200]}
+{interaction_type.title()} from @{author}: {content}
+
+Rules:
+- Reply as the user (authentic, direct, not corporate)
+- Keep it under {min(max_len, 280)} characters
+- Match the platform's tone ({platform_config.get('name', platform)})
+- If it's a question, answer helpfully
+- If it's a compliment, be gracious but brief
+- If it's a discussion point, add value
+- Never be defensive or argumentative
+
+Write ONLY the reply text."""
+
+        try:
+            reply = await self.mira.brain.think(
+                message=prompt,
+                include_history=False,
+                max_tokens=256,
+                tier="fast",
+                task_type="social_engagement",
+            )
+
+            reply = reply.strip().strip('"')
+
+            self.mira.sqlite.log_action(
+                "social", "engagement_reply",
+                f"{platform}: @{author} → {reply[:80]}",
+                {"platform": platform, "author": author, "reply": reply},
+            )
+
+            return reply
+
+        except Exception as e:
+            logger.error(f"Engagement reply generation failed: {e}")
+            return None

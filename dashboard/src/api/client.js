@@ -96,6 +96,18 @@ export const getKillSwitchStatus = () => fetchAPI('/killswitch/status')
 export const activateKillSwitch = () => fetchAPI('/killswitch', { method: 'POST' })
 export const deactivateKillSwitch = () => fetchAPI('/resume', { method: 'POST' })
 
+// ── Habits ───────────────────────────────────────────────────
+export const getHabits = () => fetchAPI('/habits')
+export const logHabit = (name) => fetchAPI(`/habits/${encodeURIComponent(name)}/log`, {
+  method: 'POST',
+})
+
+// ── Relationships ────────────────────────────────────────────
+export const getRelationshipHealth = () => fetchAPI('/relationships/health')
+
+// ── Schedule ─────────────────────────────────────────────────
+export const getScheduleHistory = () => fetchAPI('/schedule')
+
 // ── Earnings ─────────────────────────────────────────────────
 export const getEarnings = () => fetchAPI('/earnings')
 

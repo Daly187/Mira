@@ -1065,6 +1065,146 @@ Keep it concise and actionable."""
             pass
         return 0
 
+    # ── Meeting Pattern Analysis ────────────────────────────────────
+
+    async def analyse_meeting_patterns(self) -> str:
+        """Analyse meeting patterns over the last 4 weeks.
+
+        Identifies:
+        - Meetings that consistently run over scheduled time
+        - Recurring meetings with low attendance
+        - Meetings with no agenda/description (could be emails)
+        - Time spent in meetings vs deep work
+        - Busiest days/hours
+        """
+        if not self.calendar_service:
+            return "Calendar service not connected."
+
+        now = datetime.now(MANILA_TZ)
+        four_weeks_ago = now - timedelta(weeks=4)
+
+        try:
+            events_result = (
+                self.calendar_service.events()
+                .list(
+                    calendarId="primary",
+                    timeMin=four_weeks_ago.isoformat(),
+                    timeMax=now.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                    maxResults=200,
+                )
+                .execute()
+            )
+            events = events_result.get("items", [])
+        except Exception as e:
+            logger.error(f"Meeting pattern analysis failed: {e}")
+            return "Could not fetch calendar data for analysis."
+
+        if not events:
+            return "No meetings found in the last 4 weeks."
+
+        # Build analysis data
+        meetings = []
+        by_day = {}  # day_of_week -> count
+        by_hour = {}  # hour -> count
+        total_minutes = 0
+        no_description = 0
+        recurring_titles = {}
+
+        for ev in events:
+            summary = ev.get("summary", "(No title)")
+            duration = self._calc_duration_min(ev)
+            start_str = ev.get("start", {}).get("dateTime", "")
+            attendees = len(ev.get("attendees", []))
+            has_desc = bool(ev.get("description", "").strip())
+
+            if not has_desc:
+                no_description += 1
+
+            total_minutes += duration
+
+            # Track by day/hour
+            try:
+                start_dt = datetime.fromisoformat(start_str)
+                day_name = start_dt.strftime("%A")
+                hour = start_dt.hour
+                by_day[day_name] = by_day.get(day_name, 0) + 1
+                by_hour[hour] = by_hour.get(hour, 0) + 1
+            except (ValueError, TypeError):
+                pass
+
+            # Track recurring meeting titles
+            title_key = summary.lower().strip()
+            recurring_titles.setdefault(title_key, []).append({
+                "duration": duration,
+                "attendees": attendees,
+                "has_description": has_desc,
+            })
+
+            meetings.append({
+                "title": summary[:60],
+                "duration_min": duration,
+                "attendees": attendees,
+                "has_description": has_desc,
+            })
+
+        # Find meetings that could be emails (recurring, no description, small)
+        could_be_emails = []
+        for title, instances in recurring_titles.items():
+            if len(instances) >= 2:
+                avg_attendees = sum(i["attendees"] for i in instances) / len(instances)
+                any_has_desc = any(i["has_description"] for i in instances)
+                avg_duration = sum(i["duration"] for i in instances) / len(instances)
+                if avg_attendees <= 3 and not any_has_desc and avg_duration <= 30:
+                    could_be_emails.append({
+                        "title": title,
+                        "occurrences": len(instances),
+                        "avg_duration": round(avg_duration),
+                        "avg_attendees": round(avg_attendees, 1),
+                    })
+
+        analysis_data = {
+            "period": "Last 4 weeks",
+            "total_meetings": len(meetings),
+            "total_hours_in_meetings": round(total_minutes / 60, 1),
+            "avg_meetings_per_week": round(len(meetings) / 4, 1),
+            "avg_meeting_duration_min": round(total_minutes / max(len(meetings), 1)),
+            "busiest_day": max(by_day, key=by_day.get) if by_day else "N/A",
+            "busiest_hour": f"{max(by_hour, key=by_hour.get)}:00" if by_hour else "N/A",
+            "meetings_without_agenda": no_description,
+            "pct_without_agenda": round(no_description / max(len(meetings), 1) * 100),
+            "could_be_emails": could_be_emails[:5],
+            "day_distribution": dict(sorted(by_day.items())),
+        }
+
+        prompt = f"""Analyse these meeting patterns and provide actionable insights.
+
+{json.dumps(analysis_data, indent=2, default=str)}
+
+Provide:
+1. Meeting load assessment (healthy/heavy/excessive)
+2. Specific meetings that could be replaced with async updates
+3. Time recovery opportunities (how many hours/week could be freed)
+4. Recommendations for meeting hygiene (agendas, duration, attendee count)
+5. Optimal meeting-free blocks based on the data
+
+Be direct and specific. Numbers matter more than platitudes."""
+
+        analysis = await self.mira.brain.think(
+            message=prompt,
+            include_history=False,
+            max_tokens=1500,
+            tier="standard",
+            task_type="meeting_pattern_analysis",
+        )
+
+        self.mira.sqlite.log_action(
+            "pa", "meeting_pattern_analysis",
+            f"{len(meetings)} meetings analysed over 4 weeks",
+        )
+        return analysis
+
     # ── Daily Briefing ───────────────────────────────────────────────
 
     async def generate_daily_briefing(self) -> str:

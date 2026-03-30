@@ -610,6 +610,93 @@ Return a JSON array of objects, each with: person_name, date_type, date, days_un
         upcoming.sort(key=lambda x: x["days_until"])
         return upcoming
 
+    # ── Gift Intelligence ──────────────────────────────────────────────
+
+    async def suggest_gift(self, person_name: str) -> str:
+        """Generate personalised gift suggestions based on everything Mira knows.
+
+        Pulls from:
+        - Person's key_facts in CRM
+        - Conversation memories mentioning this person
+        - Important dates and past gift history
+        - Semantic memory search for preferences
+
+        Returns:
+            AI-generated gift suggestions with reasoning.
+        """
+        # 1. Get person data from CRM
+        person = self.mira.sqlite.get_person(person_name)
+        person_data = dict(person) if person else {"name": person_name}
+
+        # Parse key_facts
+        key_facts = []
+        try:
+            key_facts = json.loads(person_data.get("key_facts", "[]") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # 2. Search memories for preferences, interests, hobbies
+        memories = self.mira.sqlite.search_memories(query=person_name, limit=10)
+        memory_texts = [m.get("content", "")[:200] for m in memories]
+
+        # 3. Semantic search for deeper context
+        vector = getattr(self.mira, "vector", None)
+        semantic_results = []
+        if vector:
+            try:
+                results = vector.search(f"{person_name} likes interests hobbies", n_results=5)
+                semantic_results = [r.get("content", "")[:200] for r in results]
+            except Exception:
+                pass
+
+        # 4. Check important dates
+        important_dates = []
+        try:
+            conn = self.mira.sqlite.conn
+            rows = conn.execute(
+                "SELECT * FROM important_dates WHERE person_name LIKE ? COLLATE NOCASE",
+                (f"%{person_name}%",),
+            ).fetchall()
+            important_dates = [dict(r) for r in rows]
+        except Exception:
+            pass
+
+        prompt = f"""Generate thoughtful, personalised gift suggestions for {person_name}.
+
+Person data:
+- Relationship: {person_data.get('relationship_type', 'unknown')}
+- Key facts: {json.dumps(key_facts)}
+- Important dates: {json.dumps(important_dates, default=str)}
+
+Relevant memories:
+{chr(10).join(f'- {m}' for m in memory_texts[:5])}
+
+Additional context:
+{chr(10).join(f'- {s}' for s in semantic_results[:3])}
+
+Rules:
+1. Suggest 3-5 specific gift ideas (not generic "a nice book")
+2. Include price range for each ($, $$, $$$)
+3. Explain WHY each gift fits this person specifically
+4. Include at least one experience-based gift (not physical)
+5. Consider their relationship type when choosing formality level
+6. If you don't have enough info, suggest gifts that help you learn more about them
+
+Format each as: Gift name ($range) — Why it fits"""
+
+        result = await self.mira.brain.think(
+            message=prompt,
+            include_history=False,
+            max_tokens=1024,
+            tier="standard",
+            task_type="gift_suggestion",
+        )
+
+        self.mira.sqlite.log_action(
+            "personal", "gift_suggestion", f"for {person_name}",
+        )
+        return result
+
     # ── Presence Prompting ───────────────────────────────────────────
 
     async def check_presence(self) -> Optional[str]:
