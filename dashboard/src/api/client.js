@@ -1,19 +1,29 @@
 /**
  * Mira API client — connects dashboard to the FastAPI backend.
- * Includes Bearer token auth for remote access.
+ * Supports remote access: backend URL stored in localStorage.
+ * Token auth for secure API access.
  */
 
-const API_BASE = '/api'
+function getApiBase() {
+  const backendUrl = localStorage.getItem('mira_backend_url')
+  if (backendUrl) {
+    // Remote mode: full URL to the backend (e.g., https://mira.example.com)
+    return backendUrl.replace(/\/+$/, '') + '/api'
+  }
+  // Local mode: same-origin (FastAPI serves both dashboard and API)
+  return '/api'
+}
 
 async function fetchAPI(endpoint, options = {}) {
   const token = localStorage.getItem('mira_api_token')
+  const apiBase = getApiBase()
 
   const headers = { 'Content-Type': 'application/json', ...options.headers }
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
 
-  const response = await fetch(`${API_BASE}${endpoint}`, { ...options, headers })
+  const response = await fetch(`${apiBase}${endpoint}`, { ...options, headers })
 
   // If 401, redirect to login (unless already on login/setup)
   if (response.status === 401) {
@@ -136,10 +146,21 @@ export const testSetupService = (service) => fetchAPI(`/setup/test/${service}`, 
 })
 
 // ── Auth ─────────────────────────────────────────────────────
+export const setBackendUrl = (url) => {
+  if (url) {
+    localStorage.setItem('mira_backend_url', url.replace(/\/+$/, ''))
+  } else {
+    localStorage.removeItem('mira_backend_url')
+  }
+}
+
+export const getBackendUrl = () => localStorage.getItem('mira_backend_url') || ''
+
 export const checkAuth = async () => {
   try {
     const token = localStorage.getItem('mira_api_token')
-    const res = await fetch(`${API_BASE}/health`, {
+    const apiBase = getApiBase()
+    const res = await fetch(`${apiBase}/health`, {
       headers: token ? { 'Authorization': `Bearer ${token}` } : {}
     })
     if (!res.ok) return false
@@ -148,7 +169,7 @@ export const checkAuth = async () => {
     if (!data.auth_required) return true
     // If auth required, check if we have a valid token
     if (!token) return false
-    const statusRes = await fetch(`${API_BASE}/status`, {
+    const statusRes = await fetch(`${apiBase}/status`, {
       headers: { 'Authorization': `Bearer ${token}` }
     })
     return statusRes.ok
@@ -158,6 +179,7 @@ export const checkAuth = async () => {
 export const login = (token) => localStorage.setItem('mira_api_token', token)
 export const logout = () => {
   localStorage.removeItem('mira_api_token')
+  localStorage.removeItem('mira_backend_url')
   window.location.href = '/login'
 }
 export const isLoggedIn = () => !!localStorage.getItem('mira_api_token')
@@ -169,22 +191,25 @@ let _wsReconnectTimer = null
 
 /**
  * Connect to the Mira WebSocket for real-time updates.
- * Events are dispatched to all registered listeners.
- *
- * Usage:
- *   import { connectWS, onWSEvent, disconnectWS } from './client'
- *   connectWS()
- *   const unsub = onWSEvent((event) => {
- *     if (event.type === 'action') updateActionLog(event.data)
- *   })
- *   // cleanup: unsub(); disconnectWS()
+ * Supports remote backend via stored URL.
  */
 export function connectWS() {
   if (_ws && _ws.readyState <= 1) return // already connected or connecting
 
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const token = localStorage.getItem('mira_api_token') || ''
-  const url = `${proto}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+  const backendUrl = localStorage.getItem('mira_backend_url')
+
+  let url
+  if (backendUrl) {
+    // Remote mode: derive WebSocket URL from backend URL
+    const parsed = new URL(backendUrl)
+    const proto = parsed.protocol === 'https:' ? 'wss:' : 'ws:'
+    url = `${proto}//${parsed.host}/ws?token=${encodeURIComponent(token)}`
+  } else {
+    // Local mode: same host
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    url = `${proto}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+  }
 
   _ws = new WebSocket(url)
 

@@ -14,7 +14,9 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: path.resolve(__dirname, '../agent/static'),
+    outDir: process.env.BUILD_TARGET === 'firebase'
+      ? path.resolve(__dirname, 'dist')
+      : path.resolve(__dirname, '../agent/static'),
     emptyOutDir: true,
   },
 })
