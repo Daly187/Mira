@@ -2,7 +2,7 @@ import { Routes, Route, NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Brain, Users, Settings, Calendar,
   TrendingUp, DollarSign, Activity, Shield, Banknote, Key, LogOut,
-  Target, Heart
+  Target, Heart, Scale
 } from 'lucide-react'
 
 import Dashboard from './pages/Dashboard'
@@ -15,6 +15,7 @@ import ActionLog from './pages/ActionLog'
 import EarningsPage from './pages/EarningsPage'
 import HabitsPage from './pages/HabitsPage'
 import RelationshipsPage from './pages/RelationshipsPage'
+import DecisionJournal from './pages/DecisionJournal'
 import SettingsPage from './pages/SettingsPage'
 import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
@@ -27,6 +28,7 @@ const navItems = [
   { to: '/people', icon: Users, label: 'People' },
   { to: '/relationships', icon: Heart, label: 'Relationships' },
   { to: '/habits', icon: Target, label: 'Habits' },
+  { to: '/decisions', icon: Scale, label: 'Decisions' },
   { to: '/trades', icon: TrendingUp, label: 'Trades' },
   { to: '/earnings', icon: Banknote, label: 'Earnings' },
   { to: '/costs', icon: DollarSign, label: 'Costs' },
@@ -91,6 +93,7 @@ function MainLayout() {
           <Route path="/people" element={<PeopleCRM />} />
           <Route path="/relationships" element={<RelationshipsPage />} />
           <Route path="/habits" element={<HabitsPage />} />
+          <Route path="/decisions" element={<DecisionJournal />} />
           <Route path="/trades" element={<TradeJournal />} />
           <Route path="/earnings" element={<EarningsPage />} />
           <Route path="/costs" element={<CostTracker />} />

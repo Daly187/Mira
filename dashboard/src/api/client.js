@@ -108,6 +108,12 @@ export const getRelationshipHealth = () => fetchAPI('/relationships/health')
 // ── Schedule ─────────────────────────────────────────────────
 export const getScheduleHistory = () => fetchAPI('/schedule')
 
+// ── Decisions ────────────────────────────────────────────────
+export const getDecisions = (limit = 50) => fetchAPI(`/decisions?limit=${limit}`)
+export const scoreDecision = (id, score, outcome) => fetchAPI(`/decisions/${id}/score`, {
+  method: 'POST', body: JSON.stringify({ score, outcome }),
+})
+
 // ── Earnings ─────────────────────────────────────────────────
 export const getEarnings = () => fetchAPI('/earnings')
 

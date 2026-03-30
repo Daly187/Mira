@@ -1143,6 +1143,37 @@ async def get_schedule():
 
 
 # ═══════════════════════════════════════════════════════════════
+# DECISIONS
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/decisions")
+async def get_decisions(limit: int = Query(50)):
+    """Get recent decisions with scores."""
+    try:
+        rows = db.conn.execute(
+            "SELECT * FROM decisions ORDER BY decided_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+@app.post("/api/decisions/{decision_id}/score")
+async def score_decision(decision_id: int, request: Request):
+    """Score a past decision."""
+    try:
+        body = await request.json()
+        outcome = body.get("outcome", "")
+        score = body.get("score", 5)
+        db.score_decision(decision_id, outcome, score)
+        return {"status": "scored", "id": decision_id, "score": score}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
 # WEBSOCKET — Real-time dashboard updates
 # ═══════════════════════════════════════════════════════════════
 

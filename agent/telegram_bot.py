@@ -93,6 +93,9 @@ class MiraTelegramBot:
         # ── Research Commands ────────────────────────────────────────
         self.app.add_handler(CommandHandler("research", self._cmd_research))
 
+        # ── Decision Commands ─────────────────────────────────────────
+        self.app.add_handler(CommandHandler("decision", self._cmd_decision))
+
         # ── Gift Commands ────────────────────────────────────────────
         self.app.add_handler(CommandHandler("gift", self._cmd_gift))
 
@@ -336,6 +339,10 @@ class MiraTelegramBot:
             "/networth — Current net worth snapshot\n\n"
             "RESEARCH\n"
             "/research [topic] — Run deep research\n\n"
+            "DECISIONS\n"
+            "/decision [text] — Log a decision for tracking\n"
+            "/decision score [id] [1-10] [outcome] — Score a past decision\n"
+            "/decision review — Analyse decision patterns\n\n"
             "GIFTS\n"
             "/gift [person] — Personalised gift suggestions\n\n"
             "MEETINGS\n"
@@ -790,6 +797,172 @@ class MiraTelegramBot:
 
     async def _cmd_pause_listen(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Audio capture paused for 30 minutes. (Phase 4)")
+
+    # ══════════════════════════════════════════════════════════════════
+    # DECISION COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_decision(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Log, score, or review decisions."""
+        args = context.args or []
+
+        if not args:
+            # List recent decisions
+            try:
+                rows = self.mira.sqlite.conn.execute(
+                    "SELECT id, decision, domain, outcome_score, decided_at FROM decisions ORDER BY decided_at DESC LIMIT 10"
+                ).fetchall()
+                if not rows:
+                    await update.message.reply_text(
+                        "No decisions logged yet.\n\n"
+                        "Usage:\n"
+                        "/decision [text] — Log a decision\n"
+                        "/decision score [id] [1-10] [outcome]\n"
+                        "/decision review — Analyse patterns"
+                    )
+                    return
+                msg = "Recent Decisions\n\n"
+                for r in rows:
+                    d = dict(r)
+                    score = f" [{d['outcome_score']}/10]" if d.get("outcome_score") else " [unscored]"
+                    date = str(d.get("decided_at", ""))[:10]
+                    msg += f"#{d['id']} ({date}) {d['decision'][:60]}{score}\n"
+                msg += "\nUse /decision score [id] [1-10] [outcome] to score one."
+                await update.message.reply_text(msg)
+            except Exception as e:
+                await update.message.reply_text(f"Error: {e}")
+            return
+
+        subcmd = args[0].lower()
+
+        if subcmd == "score" and len(args) >= 3:
+            try:
+                decision_id = int(args[1])
+                score = int(args[2])
+                if score < 1 or score > 10:
+                    await update.message.reply_text("Score must be 1-10.")
+                    return
+                outcome = " ".join(args[3:]) if len(args) > 3 else ""
+                self.mira.sqlite.score_decision(decision_id, outcome, score)
+                await update.message.reply_text(f"Decision #{decision_id} scored {score}/10.")
+            except (ValueError, IndexError):
+                await update.message.reply_text("Usage: /decision score [id] [1-10] [outcome text]")
+            return
+
+        if subcmd == "review":
+            await update.message.reply_text("Analysing your decision patterns...")
+            try:
+                rows = self.mira.sqlite.conn.execute(
+                    "SELECT * FROM decisions WHERE outcome_score IS NOT NULL ORDER BY decided_at DESC LIMIT 50"
+                ).fetchall()
+
+                if not rows:
+                    await update.message.reply_text("No scored decisions yet. Score some decisions first with /decision score.")
+                    return
+
+                decisions = [dict(r) for r in rows]
+                avg_score = sum(d["outcome_score"] for d in decisions) / len(decisions)
+
+                # Group by domain
+                by_domain = {}
+                for d in decisions:
+                    domain = d.get("domain", "general")
+                    by_domain.setdefault(domain, []).append(d["outcome_score"])
+
+                domain_avgs = {
+                    k: round(sum(v) / len(v), 1) for k, v in by_domain.items()
+                }
+
+                analysis_data = {
+                    "total_scored": len(decisions),
+                    "avg_score": round(avg_score, 1),
+                    "domain_averages": domain_avgs,
+                    "worst_decisions": sorted(decisions, key=lambda x: x["outcome_score"])[:3],
+                    "best_decisions": sorted(decisions, key=lambda x: x["outcome_score"], reverse=True)[:3],
+                }
+
+                prompt = f"""Analyse these decision patterns and identify blind spots.
+
+{json.dumps(analysis_data, indent=2, default=str)}
+
+Provide:
+1. Overall decision quality assessment
+2. Which domains you decide best/worst in
+3. Common patterns in bad decisions (rushed? emotional? missing info?)
+4. Specific blind spots based on the data
+5. One actionable improvement for next week
+
+Be direct and specific. This is for self-improvement, not ego protection."""
+
+                analysis = await self.mira.brain.think(
+                    message=prompt,
+                    include_history=False,
+                    max_tokens=1500,
+                    tier="standard",
+                    task_type="decision_review",
+                )
+
+                await update.message.reply_text(f"Decision Review\n\n{analysis[:4000]}")
+            except Exception as e:
+                logger.error(f"Decision review failed: {e}")
+                await update.message.reply_text(f"Review failed: {e}")
+            return
+
+        # Default: log a new decision
+        decision_text = " ".join(args)
+
+        # Use AI to extract domain and reasoning
+        try:
+            prompt = f"""Classify this decision and extract key details. Return ONLY valid JSON.
+
+Decision: {decision_text}
+
+Return JSON with:
+- decision: the decision restated clearly (1 sentence)
+- domain: one of [trading, work, personal, finance, health, social, learning, general]
+- reasoning: brief explanation of why this decision was likely made
+- alternatives: list of 2-3 alternatives that were likely considered"""
+
+            response = await self.mira.brain.think(
+                message=prompt,
+                include_history=False,
+                system_override="You are a decision analyst. Return ONLY valid JSON.",
+                max_tokens=512,
+                tier="fast",
+                task_type="decision_classification",
+            )
+
+            cleaned = response.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1]
+                cleaned = cleaned.rsplit("```", 1)[0]
+
+            data = json.loads(cleaned)
+            decision_id = self.mira.sqlite.log_decision(
+                decision=data.get("decision", decision_text),
+                context=decision_text,
+                reasoning=data.get("reasoning", ""),
+                domain=data.get("domain", "general"),
+                alternatives=data.get("alternatives", []),
+            )
+
+            await update.message.reply_text(
+                f"Decision logged (#{decision_id})\n\n"
+                f"Domain: {data.get('domain', 'general')}\n"
+                f"Decision: {data.get('decision', decision_text)[:200]}\n\n"
+                f"Score it later with: /decision score {decision_id} [1-10] [outcome]"
+            )
+
+        except (json.JSONDecodeError, Exception):
+            # Fallback: log without AI classification
+            decision_id = self.mira.sqlite.log_decision(
+                decision=decision_text,
+                domain="general",
+            )
+            await update.message.reply_text(
+                f"Decision logged (#{decision_id})\n\n"
+                f"Score it later: /decision score {decision_id} [1-10] [outcome]"
+            )
 
     # ══════════════════════════════════════════════════════════════════
     # GIFT COMMANDS
