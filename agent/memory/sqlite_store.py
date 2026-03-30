@@ -19,6 +19,7 @@ class SQLiteStore:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.conn = None
+        self._action_callback = None  # optional callback(module, action, outcome, details)
 
     def initialise(self):
         """Create database and tables if they don't exist."""
@@ -481,6 +482,12 @@ class SQLiteStore:
             (module, action, outcome, json.dumps(details or {})),
         )
         self.conn.commit()
+        # Fire optional callback for real-time WebSocket broadcast
+        if self._action_callback:
+            try:
+                self._action_callback(module, action, outcome, details)
+            except Exception:
+                pass  # never let callback errors break action logging
 
     def get_daily_actions(self, date: str = None) -> list[dict]:
         """Get all actions for a given day."""

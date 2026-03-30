@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -1027,6 +1027,73 @@ def get_modules():
 
 
 # ═══════════════════════════════════════════════════════════════
+# WEBSOCKET — Real-time dashboard updates
+# ═══════════════════════════════════════════════════════════════
+
+_ws_clients: set[WebSocket] = set()
+
+
+async def broadcast_event(event_type: str, data: dict = None):
+    """Broadcast an event to all connected WebSocket clients.
+
+    Call this from anywhere in the agent to push real-time updates:
+        from api import broadcast_event
+        await broadcast_event("action", {"module": "trading", "action": "trade_opened"})
+    """
+    if not _ws_clients:
+        return
+    payload = json.dumps({"type": event_type, "data": data or {}, "ts": datetime.now().isoformat()})
+    dead = set()
+    for ws in _ws_clients:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            dead.add(ws)
+    _ws_clients -= dead
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket connection for real-time dashboard updates.
+
+    Clients connect and receive JSON events:
+    - {"type": "action", "data": {...}} — new action logged
+    - {"type": "memory", "data": {...}} — new memory stored
+    - {"type": "trade", "data": {...}} — trade opened/closed
+    - {"type": "status", "data": {...}} — status change
+    - {"type": "ping"} — keepalive (every 30s)
+    """
+    # Auth check: token as query param or first message
+    token = websocket.query_params.get("token", "")
+    if Config.API_TOKEN and token != Config.API_TOKEN:
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+
+    await websocket.accept()
+    _ws_clients.add(websocket)
+    logger.info(f"WebSocket client connected ({len(_ws_clients)} total)")
+
+    try:
+        import asyncio
+        while True:
+            # Send keepalive ping every 30 seconds
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+                # Client can send "ping" to get a "pong"
+                if msg.strip().lower() == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+            except asyncio.TimeoutError:
+                await websocket.send_text(json.dumps({"type": "ping"}))
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        _ws_clients.discard(websocket)
+        logger.info(f"WebSocket client disconnected ({len(_ws_clients)} total)")
+
+
+# ═══════════════════════════════════════════════════════════════
 # HEALTH CHECK (no auth required)
 # ═══════════════════════════════════════════════════════════════
 
@@ -1034,7 +1101,13 @@ def get_modules():
 @app.get("/api/health")
 async def health():
     """Health check endpoint — no auth required."""
-    return {"status": "ok", "version": "1.0", "auth_required": bool(Config.API_TOKEN)}
+    return {
+        "status": "ok",
+        "version": "1.0",
+        "auth_required": bool(Config.API_TOKEN),
+        "websocket": "/ws",
+        "ws_clients": len(_ws_clients),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════

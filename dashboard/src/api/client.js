@@ -137,3 +137,78 @@ export const logout = () => {
   window.location.href = '/login'
 }
 export const isLoggedIn = () => !!localStorage.getItem('mira_api_token')
+
+// ── WebSocket ────────────────────────────────────────────────
+let _ws = null
+let _wsListeners = new Set()
+let _wsReconnectTimer = null
+
+/**
+ * Connect to the Mira WebSocket for real-time updates.
+ * Events are dispatched to all registered listeners.
+ *
+ * Usage:
+ *   import { connectWS, onWSEvent, disconnectWS } from './client'
+ *   connectWS()
+ *   const unsub = onWSEvent((event) => {
+ *     if (event.type === 'action') updateActionLog(event.data)
+ *   })
+ *   // cleanup: unsub(); disconnectWS()
+ */
+export function connectWS() {
+  if (_ws && _ws.readyState <= 1) return // already connected or connecting
+
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const token = localStorage.getItem('mira_api_token') || ''
+  const url = `${proto}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+
+  _ws = new WebSocket(url)
+
+  _ws.onopen = () => {
+    console.log('[Mira WS] Connected')
+    if (_wsReconnectTimer) {
+      clearTimeout(_wsReconnectTimer)
+      _wsReconnectTimer = null
+    }
+  }
+
+  _ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      if (data.type === 'ping') {
+        _ws.send('ping')
+        return
+      }
+      _wsListeners.forEach((fn) => fn(data))
+    } catch (e) {
+      console.warn('[Mira WS] Bad message:', e)
+    }
+  }
+
+  _ws.onclose = () => {
+    console.log('[Mira WS] Disconnected, reconnecting in 5s...')
+    _ws = null
+    _wsReconnectTimer = setTimeout(connectWS, 5000)
+  }
+
+  _ws.onerror = () => {
+    _ws?.close()
+  }
+}
+
+export function onWSEvent(listener) {
+  _wsListeners.add(listener)
+  return () => _wsListeners.delete(listener)
+}
+
+export function disconnectWS() {
+  if (_wsReconnectTimer) {
+    clearTimeout(_wsReconnectTimer)
+    _wsReconnectTimer = null
+  }
+  if (_ws) {
+    _ws.close()
+    _ws = null
+  }
+  _wsListeners.clear()
+}
