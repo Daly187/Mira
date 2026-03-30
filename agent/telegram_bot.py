@@ -84,6 +84,12 @@ class MiraTelegramBot:
         self.app.add_handler(CommandHandler("budget", self._cmd_budget))
         self.app.add_handler(CommandHandler("networth", self._cmd_networth))
 
+        # ── Task Commands ─────────────────────────────────────────────
+        self.app.add_handler(CommandHandler("tasks", self._cmd_tasks))
+
+        # ── Email Commands ────────────────────────────────────────────
+        self.app.add_handler(CommandHandler("email", self._cmd_email))
+
         # ── Research Commands ────────────────────────────────────────
         self.app.add_handler(CommandHandler("research", self._cmd_research))
 
@@ -295,6 +301,12 @@ class MiraTelegramBot:
             "/daily_report — Generate today's trading report\n"
             "/risk [%] — Update daily drawdown limit\n"
             "/portfolio — Show full crypto portfolio\n\n"
+            "TASKS\n"
+            "/tasks — List pending tasks\n"
+            "/tasks add [title] — Create a task\n"
+            "/tasks done [id] — Complete a task\n\n"
+            "EMAIL\n"
+            "/email — Check and triage unread email\n\n"
             "SOCIAL\n"
             "/post [platform] [content] — Draft and queue a post\n"
             "/queue — Show pending posts in content queue\n\n"
@@ -424,7 +436,27 @@ class MiraTelegramBot:
         await update.message.reply_text(msg)
 
     async def _cmd_close_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Close all positions — requires computer use (Phase 7).")
+        """Close all open positions via computer use."""
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu or not cu.client:
+            await update.message.reply_text("Computer use not available — cannot close positions.")
+            return
+
+        open_trades = self.mira.sqlite.get_open_trades()
+        if not open_trades:
+            await update.message.reply_text("No open positions to close.")
+            return
+
+        # Confirm before executing
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Yes, close all", callback_data="confirm_close_all"),
+            InlineKeyboardButton("Cancel", callback_data="cancel_close_all"),
+        ]])
+        await update.message.reply_text(
+            f"Close ALL {len(open_trades)} open positions?\n\n"
+            f"This will use computer use to close each position in MT5.",
+            reply_markup=keyboard,
+        )
 
     async def _cmd_pause_trading(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         self.mira.sqlite.set_preference("trading_paused", "true", confidence=1.0, source="command")
@@ -635,6 +667,89 @@ class MiraTelegramBot:
         result = await self.mira.brain.deep_research(topic)
         await update.message.reply_text(result)
         self.mira.sqlite.log_action("research", f"research: {topic}", "completed")
+
+    # ══════════════════════════════════════════════════════════════════
+    # TASK COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_tasks(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """View and manage pending tasks."""
+        if context.args and context.args[0] == "add":
+            # /tasks add Buy groceries
+            title = " ".join(context.args[1:])
+            if not title:
+                await update.message.reply_text("Usage: /tasks add [title]")
+                return
+            task_id = self.mira.sqlite.add_task(title=title, module="manual", priority=3)
+            await update.message.reply_text(f"Task added: {title} (#{task_id})")
+            return
+
+        if context.args and context.args[0] == "done":
+            # /tasks done 5
+            try:
+                task_id = int(context.args[1])
+                self.mira.sqlite.complete_task(task_id)
+                await update.message.reply_text(f"Task #{task_id} marked complete.")
+            except (IndexError, ValueError):
+                await update.message.reply_text("Usage: /tasks done [id]")
+            return
+
+        # List pending tasks
+        tasks = self.mira.sqlite.get_pending_tasks()
+        if not tasks:
+            await update.message.reply_text("No pending tasks.\n\nUse /tasks add [title] to create one.")
+            return
+
+        msg = f"Pending Tasks ({len(tasks)}):\n\n"
+        for t in tasks[:20]:
+            priority = t.get("priority", "?")
+            title = t.get("title", "?")
+            tid = t.get("id", "?")
+            module = t.get("module", "")
+            msg += f"  #{tid} [{priority}] {title}"
+            if module:
+                msg += f" ({module})"
+            msg += "\n"
+        if len(tasks) > 20:
+            msg += f"\n  ...and {len(tasks) - 20} more"
+        msg += "\n\nCommands: /tasks add [title] | /tasks done [id]"
+        await update.message.reply_text(msg[:4000])
+
+    # ══════════════════════════════════════════════════════════════════
+    # EMAIL COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_email(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Check email and show triage results."""
+        if not hasattr(self.mira, "pa") or not self.mira.pa.gmail_service:
+            await update.message.reply_text(
+                "Gmail not connected.\n\n"
+                "Set up Google OAuth credentials and run the auth flow first."
+            )
+            return
+
+        await update.message.reply_text("Checking email...")
+        try:
+            emails = await self.mira.pa.check_email()
+            if not emails:
+                await update.message.reply_text("Inbox clear — no unread emails.")
+                return
+
+            msg = f"Email Triage ({len(emails)} unread):\n\n"
+            for e in emails[:10]:
+                sender = e.get("from", "?")[:30]
+                subject = e.get("subject", "?")[:40]
+                ev = e.get("evaluation", {})
+                urgency = ev.get("urgency", "?")
+                importance = ev.get("importance", "?")
+                category = ev.get("category", "?")
+                msg += f"  [{urgency}/{importance}] {sender}\n  {subject}\n  → {category}\n\n"
+
+            if len(emails) > 10:
+                msg += f"...and {len(emails) - 10} more"
+            await update.message.reply_text(msg[:4000])
+        except Exception as e:
+            await update.message.reply_text(f"Email check failed: {e}")
 
     # ══════════════════════════════════════════════════════════════════
     # CAPTURE COMMANDS
