@@ -1077,6 +1077,35 @@ Return ONLY the nudge text, no JSON or formatting."""
                 health_score -= 15
                 issues.append("No recorded conversations")
 
+            # Sentiment scoring from recent interaction memories
+            sentiment_score = None
+            try:
+                recent_memories = self.mira.sqlite.search_memories(query=name, limit=5)
+                if recent_memories:
+                    memory_texts = [m.get("content", "")[:150] for m in recent_memories]
+                    sent_response = await self.mira.brain.think(
+                        message=f"Rate the overall sentiment of these recent interactions with {name} "
+                                f"on a scale of 1-10 (1=very negative, 5=neutral, 10=very positive). "
+                                f"Return ONLY the number.\n\n"
+                                + "\n".join(f"- {t}" for t in memory_texts),
+                        include_history=False,
+                        system_override="Return ONLY a single integer 1-10.",
+                        max_tokens=8,
+                        tier="fast",
+                        task_type="sentiment_score",
+                    )
+                    score_val = int(sent_response.strip())
+                    if 1 <= score_val <= 10:
+                        sentiment_score = score_val
+                        if score_val <= 3:
+                            health_score -= 15
+                            issues.append(f"Recent interactions seem negative (sentiment {score_val}/10)")
+                        elif score_val <= 5:
+                            health_score -= 5
+                            issues.append(f"Neutral/cool interactions recently (sentiment {score_val}/10)")
+            except Exception:
+                pass
+
             # Only flag people who need attention
             if health_score >= 80:
                 continue
@@ -1087,6 +1116,7 @@ Return ONLY the nudge text, no JSON or formatting."""
                 "health_score": max(0, health_score),
                 "days_since_contact": days_since,
                 "conversation_count": conversation_count,
+                "sentiment_score": sentiment_score,
                 "issues": issues,
                 "commitments": commitments[:3],
             })
