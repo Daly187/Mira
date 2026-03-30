@@ -184,7 +184,58 @@ def get_kpis():
             "actions_today": len(actions_today),
             "pending_tasks": stats.get("tasks", 0),
         },
+        "email": _get_email_kpis(),
+        "habits": _get_habit_kpis(),
     }
+
+
+def _get_email_kpis() -> dict:
+    """Email stats for KPI dashboard."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        week_ago = (datetime.now() - __import__('datetime').timedelta(days=7)).isoformat()
+
+        triaged_today = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM action_log WHERE module = 'pa' AND action LIKE '%triage%' AND created_at >= ?",
+            (today,),
+        ).fetchone()
+        triaged_week = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM action_log WHERE module = 'pa' AND action LIKE '%triage%' AND created_at >= ?",
+            (week_ago,),
+        ).fetchone()
+        auto_filed = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM action_log WHERE module = 'pa' AND action LIKE '%auto_filed%' AND created_at >= ?",
+            (week_ago,),
+        ).fetchone()
+
+        return {
+            "triaged_today": dict(triaged_today).get("cnt", 0) if triaged_today else 0,
+            "triaged_this_week": dict(triaged_week).get("cnt", 0) if triaged_week else 0,
+            "auto_filed_this_week": dict(auto_filed).get("cnt", 0) if auto_filed else 0,
+        }
+    except Exception:
+        return {"triaged_today": 0, "triaged_this_week": 0, "auto_filed_this_week": 0}
+
+
+def _get_habit_kpis() -> dict:
+    """Habit stats for KPI dashboard."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        total = db.conn.execute("SELECT COUNT(*) as cnt FROM habits").fetchone()
+        done = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM habits WHERE last_completed = ?", (today,)
+        ).fetchone()
+        best_streak = db.conn.execute(
+            "SELECT MAX(streak) as best FROM habits"
+        ).fetchone()
+
+        return {
+            "total": dict(total).get("cnt", 0) if total else 0,
+            "done_today": dict(done).get("cnt", 0) if done else 0,
+            "best_streak": dict(best_streak).get("best", 0) if best_streak else 0,
+        }
+    except Exception:
+        return {"total": 0, "done_today": 0, "best_streak": 0}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -776,6 +827,46 @@ def get_killswitch_status():
     value = db.get_preference("kill_switch_active")
     active = value is not None and value.lower() == "true"
     return {"kill_switch_active": active}
+
+
+# ═══════════════════════════════════════════════════════════════
+# SOCIAL
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/social/stats")
+async def get_social_stats():
+    """Get social media engagement stats from content_queue and action_log."""
+    try:
+        from datetime import timedelta
+        now = datetime.now()
+        week_ago = (now - timedelta(days=7)).isoformat()
+        month_ago = (now - timedelta(days=30)).isoformat()
+
+        posts_week = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM content_queue WHERE status = 'posted' AND posted_at >= ?",
+            (week_ago,),
+        ).fetchone()
+        posts_month = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM content_queue WHERE status = 'posted' AND posted_at >= ?",
+            (month_ago,),
+        ).fetchone()
+        queued = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM content_queue WHERE status = 'queued'"
+        ).fetchone()
+        by_platform = db.conn.execute(
+            "SELECT platform, COUNT(*) as cnt FROM content_queue WHERE status = 'posted' AND posted_at >= ? GROUP BY platform",
+            (month_ago,),
+        ).fetchall()
+
+        return {
+            "posts_this_week": dict(posts_week).get("cnt", 0) if posts_week else 0,
+            "posts_this_month": dict(posts_month).get("cnt", 0) if posts_month else 0,
+            "queued": dict(queued).get("cnt", 0) if queued else 0,
+            "platform_breakdown": {dict(r)["platform"]: dict(r)["cnt"] for r in by_platform},
+        }
+    except Exception:
+        return {"posts_this_week": 0, "posts_this_month": 0, "queued": 0, "platform_breakdown": {}}
 
 
 # ═══════════════════════════════════════════════════════════════

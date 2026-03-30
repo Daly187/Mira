@@ -784,6 +784,23 @@ class Mira:
             if last_action else "None today"
         )
 
+        # Open trades
+        open_trades = self.sqlite.get_open_trades()
+
+        # Habits today
+        habits_done = 0
+        habits_total = 0
+        try:
+            rows = self.sqlite.conn.execute("SELECT COUNT(*) as total FROM habits").fetchone()
+            habits_total = dict(rows).get("total", 0) if rows else 0
+            today = datetime.now().strftime("%Y-%m-%d")
+            done = self.sqlite.conn.execute(
+                "SELECT COUNT(*) as done FROM habits WHERE last_completed = ?", (today,)
+            ).fetchone()
+            habits_done = dict(done).get("done", 0) if done else 0
+        except Exception:
+            pass
+
         return (
             f"{'PAUSED' if self.paused else 'MIRA ONLINE'}\n"
             f"Uptime: {uptime_str} | Mode: {mode}\n\n"
@@ -796,6 +813,8 @@ class Mira:
             f"Today:\n"
             f"  Actions: {len(daily_actions)}\n"
             f"  API Cost: ${costs['total_cost']:.4f} ({costs['total_calls']} calls)\n"
+            f"  Open Trades: {len(open_trades)}\n"
+            f"  Habits: {habits_done}/{habits_total} done\n"
             f"  Last: {last_action_str}\n\n"
             f"Scheduled: {len(scheduler_status)} tasks\n"
             + "\n".join(
