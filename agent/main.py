@@ -533,32 +533,58 @@ class Mira:
 
     def get_status(self) -> str:
         """Get current Mira status."""
-        uptime = datetime.now() - self.start_time if self.start_time else "Not started"
+        now = datetime.now()
+        uptime = now - self.start_time if self.start_time else "Not started"
         mode = "PAUSED (listen-only)" if self.paused else "ACTIVE"
         stats = self.sqlite.get_stats()
         graph_stats = self.graph.get_stats()
         scheduler_status = self.scheduler.get_status()
         costs = self.sqlite.get_api_costs("today")
+        daily_actions = self.sqlite.get_daily_actions()
+
+        # Format uptime nicely
+        if isinstance(uptime, str):
+            uptime_str = uptime
+        else:
+            hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+            minutes = remainder // 60
+            uptime_str = f"{hours}h {minutes}m"
+
+        # Module health check
+        modules = {
+            "Brain": bool(self.brain and self.brain.client),
+            "Memory": bool(self.sqlite),
+            "Vector": bool(self.vector),
+            "Graph": bool(self.graph),
+            "Telegram": bool(self.telegram and self.telegram.app),
+            "Computer Use": bool(self.computer_use and self.computer_use.client),
+        }
+        health = " | ".join(f"{'OK' if v else 'OFF'} {k}" for k, v in modules.items())
+
+        # Last action
+        last_action = daily_actions[0] if daily_actions else None
+        last_action_str = (
+            f"{last_action.get('module', '?')}: {last_action.get('action', '?')[:40]}"
+            if last_action else "None today"
+        )
 
         return (
-            f"Status: {mode}\n"
-            f"Uptime: {uptime}\n"
-            f"Started: {self.start_time}\n\n"
+            f"{'PAUSED' if self.paused else 'MIRA ONLINE'}\n"
+            f"Uptime: {uptime_str} | Mode: {mode}\n\n"
+            f"Modules: {health}\n\n"
             f"Memory:\n"
-            f"  Memories: {stats.get('memories', 0)}\n"
-            f"  People: {stats.get('people', 0)}\n"
-            f"  Events: {stats.get('events', 0)}\n"
-            f"  Decisions: {stats.get('decisions', 0)}\n"
-            f"  Tasks: {stats.get('tasks', 0)}\n"
-            f"  Trades: {stats.get('trades', 0)}\n"
-            f"  Actions today: {len(self.sqlite.get_daily_actions())}\n"
-            f"  Graph: {graph_stats['nodes']} nodes, {graph_stats['edges']} edges\n"
-            f"  Semantic: {self.vector.count()} embeddings\n\n"
-            f"API Cost today: ${costs['total_cost']:.4f} ({costs['total_calls']} calls)\n\n"
-            f"Scheduled tasks: {len(scheduler_status)}\n"
+            f"  {stats.get('memories', 0)} memories | {stats.get('people', 0)} people | "
+            f"{stats.get('trades', 0)} trades\n"
+            f"  {graph_stats['nodes']} graph nodes | {self.vector.count()} embeddings\n"
+            f"  {stats.get('tasks', 0)} tasks | {stats.get('decisions', 0)} decisions\n\n"
+            f"Today:\n"
+            f"  Actions: {len(daily_actions)}\n"
+            f"  API Cost: ${costs['total_cost']:.4f} ({costs['total_calls']} calls)\n"
+            f"  Last: {last_action_str}\n\n"
+            f"Scheduled: {len(scheduler_status)} tasks\n"
             + "\n".join(
-                f"  {s['name']}: last={s['last_run']}, runs={s['run_count']}"
-                for s in scheduler_status
+                f"  {s['name']}: runs={s['run_count']}"
+                for s in scheduler_status[:10]
             )
         )
 
@@ -661,10 +687,26 @@ class Mira:
                 # Simple app name (<50 chars, no "and"/"then" = just open it)
                 if app_name and len(app_name) < 50 and " and " not in app_name.lower():
                     from computer_use.actions import ComputerActions
+                    import asyncio as _aio
                     actions = ComputerActions(self.computer_use)
                     try:
                         result = await actions.open_application(app_name)
                         self.sqlite.log_action("computer_use", f"open: {app_name}", "success")
+                        # Wait for app to load, then send confirmation screenshot
+                        await _aio.sleep(2.0)
+                        path = await self.computer_use.screenshot_to_file()
+                        if path and self.telegram:
+                            import os
+                            try:
+                                with open(path, "rb") as photo:
+                                    await self.telegram.app.bot.send_photo(
+                                        chat_id=self.telegram.chat_id, photo=photo,
+                                        caption=f"Opened {app_name}."
+                                    )
+                                return f"Opened {app_name}."
+                            finally:
+                                if os.path.exists(path):
+                                    os.remove(path)
                         return f"Opened {app_name}."
                     except Exception as e:
                         return f"Failed to open {app_name}: {e}"

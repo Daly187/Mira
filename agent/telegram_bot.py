@@ -490,12 +490,13 @@ class MiraTelegramBot:
     # ══════════════════════════════════════════════════════════════════
 
     async def _cmd_cost(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show API cost breakdown."""
+        """Show API cost breakdown with projected monthly spend."""
         period = context.args[0] if context.args else "today"
         if period not in ("today", "week", "month", "all"):
             period = "today"
 
         costs = self.mira.sqlite.get_api_costs(period)
+        today_costs = self.mira.sqlite.get_api_costs("today")
 
         msg = f"API Costs ({period})\n\n"
         msg += f"Total: ${costs['total_cost']:.4f} ({costs['total_calls']} calls)\n\n"
@@ -507,9 +508,16 @@ class MiraTelegramBot:
             msg += "\n"
 
         if costs["by_task"]:
-            msg += "By Task:\n"
-            for t in costs["by_task"]:
+            msg += "Top Tasks:\n"
+            for t in sorted(costs["by_task"], key=lambda x: x["cost"], reverse=True)[:8]:
                 msg += f"  {t['task_type']}: ${t['cost']:.4f} ({t['calls']}x)\n"
+            msg += "\n"
+
+        # Projected monthly cost based on today's spend
+        daily_cost = today_costs["total_cost"]
+        projected = daily_cost * 30
+        msg += f"Today so far: ${daily_cost:.4f}\n"
+        msg += f"Projected monthly: ${projected:.2f}\n"
 
         msg += f"\nUsage: /cost [today|week|month|all]"
         await update.message.reply_text(msg)
