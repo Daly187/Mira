@@ -350,6 +350,31 @@ class Mira:
             run_at=time(8, 30),
         ))
 
+        # Habit check — gentle nudge at 12pm and 8pm
+        for label, hour in [("midday", 12), ("evening", 20)]:
+            self.scheduler.add(ScheduledTask(
+                name=f"habit_check_{label}",
+                callback=self._task_habit_check,
+                schedule_type="daily",
+                run_at=time(hour, 0),
+            ))
+
+        # Presence check — remind to take a break if working too long (every 2 hours)
+        self.scheduler.add(ScheduledTask(
+            name="presence_check",
+            callback=self._task_presence_check,
+            schedule_type="interval",
+            interval_seconds=7200,
+        ))
+
+        # Email check every 30 minutes
+        self.scheduler.add(ScheduledTask(
+            name="email_check",
+            callback=self._task_email_check,
+            schedule_type="interval",
+            interval_seconds=1800,
+        ))
+
         logger.info(f"Registered {len(self.scheduler.tasks)} scheduled tasks")
 
     # ── Scheduled Task Callbacks ─────────────────────────────────────
@@ -446,6 +471,55 @@ class Mira:
                     await self.telegram.send(f"Deadline Warnings\n\n{warnings}")
         except Exception as e:
             logger.debug(f"Deadline warning check skipped: {e}")
+
+    async def _task_habit_check(self):
+        """Check habits and send gentle nudges for missed ones."""
+        try:
+            reminders = await self.personal.check_habits()
+            if reminders:
+                msg = "Habit Check-in\n\n"
+                msg += "\n".join(f"- {r}" for r in reminders)
+                await self.telegram.send(msg)
+                self.sqlite.log_action("personal", "habit_nudge", f"{len(reminders)} reminders sent")
+        except Exception as e:
+            logger.error(f"Habit check failed: {e}")
+
+    async def _task_presence_check(self):
+        """Remind to take a break if actively working for extended periods."""
+        try:
+            # Check last few hours of actions for continuous activity
+            actions = self.sqlite.get_daily_actions()
+            if not actions:
+                return
+
+            now = datetime.now()
+            recent = [a for a in actions if a.get("created_at") and
+                      (now - datetime.fromisoformat(str(a["created_at"]))).total_seconds() < 7200]
+
+            if len(recent) >= 8:  # 8+ actions in 2 hours = heavy activity
+                await self.telegram.send(
+                    "You've been going hard for a while. "
+                    "Quick break? Even 5 minutes helps."
+                )
+                self.sqlite.log_action("personal", "presence_check", "break reminder sent")
+        except Exception as e:
+            logger.debug(f"Presence check skipped: {e}")
+
+    async def _task_email_check(self):
+        """Periodic email check — triage and alert on high-urgency items."""
+        try:
+            if hasattr(self.pa, "check_email"):
+                results = await self.pa.check_email()
+                if results:
+                    urgent = [e for e in results if isinstance(e, dict) and e.get("urgency", 0) >= 4]
+                    if urgent:
+                        msg = f"Email Alert — {len(urgent)} urgent\n\n"
+                        for e in urgent[:3]:
+                            msg += f"  [{e.get('urgency', '?')}] {e.get('subject', 'No subject')[:60]}\n"
+                        await self.telegram.send(msg)
+                        self.sqlite.log_action("pa", "email_alert", f"{len(urgent)} urgent emails")
+        except Exception as e:
+            logger.debug(f"Email check skipped: {e}")
 
     # ── Core Loop ────────────────────────────────────────────────────
 

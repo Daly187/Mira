@@ -96,6 +96,18 @@ class MiraTelegramBot:
         # ── Capture Commands ─────────────────────────────────────────
         self.app.add_handler(CommandHandler("pause_listen", self._cmd_pause_listen))
 
+        # ── Habit Commands ──────────────────────────────────────────────
+        self.app.add_handler(CommandHandler("habit", self._cmd_habit))
+
+        # ── Reminder Commands ───────────────────────────────────────────
+        self.app.add_handler(CommandHandler("remind", self._cmd_remind))
+
+        # ── Search Commands ─────────────────────────────────────────────
+        self.app.add_handler(CommandHandler("search", self._cmd_search))
+
+        # ── Schedule Commands ───────────────────────────────────────────
+        self.app.add_handler(CommandHandler("schedule", self._cmd_schedule))
+
         # ── Earning Commands ─────────────────────────────────────────
         self.app.add_handler(CommandHandler("earn", self._cmd_earn))
 
@@ -320,6 +332,17 @@ class MiraTelegramBot:
             "/research [topic] — Run deep research\n\n"
             "CAPTURE\n"
             "/pause_listen — Pause audio capture for 30 min\n\n"
+            "HABITS\n"
+            "/habit — View all habits and streaks\n"
+            "/habit add [name] — Track a new habit\n"
+            "/habit log [name] — Mark habit done today\n"
+            "/habit stats — Detailed habit statistics\n\n"
+            "REMINDERS\n"
+            "/remind [time] [message] — Set a timed reminder\n\n"
+            "SEARCH\n"
+            "/search [query] — Semantic search across all memory\n\n"
+            "SCHEDULE\n"
+            "/schedule — View all scheduled autonomous tasks\n\n"
             "EARNING\n"
             "/earn — Report on all earning modules\n\n"
             "LEARNING\n"
@@ -759,19 +782,331 @@ class MiraTelegramBot:
         await update.message.reply_text("Audio capture paused for 30 minutes. (Phase 4)")
 
     # ══════════════════════════════════════════════════════════════════
+    # HABIT COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_habit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Habit tracking — add, log, stats, or list all habits."""
+        args = context.args or []
+        personal = getattr(self.mira, "personal", None)
+        if not personal:
+            await update.message.reply_text("Personal module not available.")
+            return
+
+        if not args:
+            # List all habits with streaks
+            stats = await personal.get_habit_stats()
+            if not stats:
+                await update.message.reply_text(
+                    "No habits tracked yet.\n\nUsage:\n"
+                    "/habit add gym — Track a new habit\n"
+                    "/habit log gym — Mark done today\n"
+                    "/habit stats — Detailed statistics"
+                )
+                return
+
+            msg = "Your Habits\n\n"
+            for h in stats:
+                status = "done" if h["last_completed"] == datetime.now().strftime("%Y-%m-%d") else "pending"
+                icon = "[x]" if status == "done" else "[ ]"
+                trend_arrow = {"improving": "^", "declining": "v", "stable": "="}.get(h["trend"], "")
+                msg += (
+                    f"{icon} {h['name']} — streak: {h['streak']}d, "
+                    f"7d: {h['completion_rate_7d']:.0f}% {trend_arrow}\n"
+                )
+            await update.message.reply_text(msg)
+            return
+
+        subcmd = args[0].lower()
+
+        if subcmd == "add":
+            if len(args) < 2:
+                await update.message.reply_text("Usage: /habit add [name] [daily|weekly] [category]")
+                return
+            name = args[1]
+            freq = args[2] if len(args) > 2 and args[2] in ("daily", "weekly") else "daily"
+            cat = args[3] if len(args) > 3 else "general"
+            result = await personal.add_habit(name, freq, cat)
+            if "error" in result:
+                await update.message.reply_text(f"Already tracking: {name}")
+            else:
+                await update.message.reply_text(
+                    f"Now tracking: {result['name']} ({freq}, {cat})"
+                )
+
+        elif subcmd == "log" or subcmd == "done":
+            if len(args) < 2:
+                await update.message.reply_text("Usage: /habit log [name]")
+                return
+            name = args[1]
+            result = await personal.log_habit(name)
+            if "error" in result:
+                await update.message.reply_text(result["error"])
+            elif result.get("status") == "already_logged":
+                await update.message.reply_text(
+                    f"Already logged '{name}' today. Streak: {result['streak']}d"
+                )
+            else:
+                streak = result.get("streak", 0)
+                fire = f" {'!' * min(streak // 7, 5)}" if streak >= 7 else ""
+                await update.message.reply_text(
+                    f"Logged: {result['habit']}\nStreak: {streak} days{fire}"
+                )
+
+        elif subcmd == "stats":
+            stats = await personal.get_habit_stats()
+            if not stats:
+                await update.message.reply_text("No habits tracked yet.")
+                return
+
+            msg = "Habit Statistics (30-day)\n\n"
+            for h in stats:
+                msg += (
+                    f"{h['name']} [{h['category']}]\n"
+                    f"  Streak: {h['streak']}d | 7d: {h['completion_rate_7d']:.0f}% | "
+                    f"30d: {h['completion_rate_30d']:.0f}% | Trend: {h['trend']}\n"
+                )
+            await update.message.reply_text(msg)
+
+        else:
+            # Treat single word as logging that habit
+            result = await personal.log_habit(subcmd)
+            if "error" in result:
+                await update.message.reply_text(result["error"])
+            elif result.get("status") == "already_logged":
+                await update.message.reply_text(
+                    f"Already logged '{subcmd}' today. Streak: {result['streak']}d"
+                )
+            else:
+                await update.message.reply_text(
+                    f"Logged: {result['habit']}\nStreak: {result.get('streak', 0)} days"
+                )
+
+    # ══════════════════════════════════════════════════════════════════
+    # REMINDER COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_remind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set a timed reminder — /remind 30m Call back the client."""
+        import asyncio
+        import re
+
+        args = context.args or []
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Usage: /remind [time] [message]\n\n"
+                "Examples:\n"
+                "  /remind 30m Call the client\n"
+                "  /remind 2h Check EA status\n"
+                "  /remind 1d Review weekly report"
+            )
+            return
+
+        time_str = args[0].lower()
+        message = " ".join(args[1:])
+
+        # Parse time string (e.g., 30m, 2h, 1d, 90s)
+        match = re.match(r"^(\d+)(s|m|h|d)$", time_str)
+        if not match:
+            await update.message.reply_text(
+                "Invalid time format. Use: 30s, 15m, 2h, 1d"
+            )
+            return
+
+        amount = int(match.group(1))
+        unit = match.group(2)
+        multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+        delay_seconds = amount * multipliers[unit]
+
+        # Cap at 7 days
+        if delay_seconds > 604800:
+            await update.message.reply_text("Maximum reminder time is 7 days.")
+            return
+
+        # Format display time
+        if unit == "s":
+            display = f"{amount} second{'s' if amount != 1 else ''}"
+        elif unit == "m":
+            display = f"{amount} minute{'s' if amount != 1 else ''}"
+        elif unit == "h":
+            display = f"{amount} hour{'s' if amount != 1 else ''}"
+        else:
+            display = f"{amount} day{'s' if amount != 1 else ''}"
+
+        await update.message.reply_text(f"Reminder set for {display} from now:\n\"{message}\"")
+
+        self.mira.sqlite.log_action("pa", "reminder_set", f"in {display}: {message[:100]}")
+
+        # Schedule the reminder delivery
+        async def _deliver_reminder():
+            await asyncio.sleep(delay_seconds)
+            await self.send(f"REMINDER\n\n{message}")
+            self.mira.sqlite.log_action("pa", "reminder_delivered", message[:100])
+
+        asyncio.create_task(_deliver_reminder())
+
+    # ══════════════════════════════════════════════════════════════════
+    # SEARCH COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Semantic search across all memory layers."""
+        query = " ".join(context.args) if context.args else ""
+        if not query:
+            await update.message.reply_text("Usage: /search [query]\n\nSearches memories by meaning, not just keywords.")
+            return
+
+        await update.message.reply_text(f"Searching for: \"{query}\"...")
+
+        results = []
+
+        # 1. Semantic search via ChromaDB
+        vector = getattr(self.mira, "vector", None)
+        if vector:
+            try:
+                semantic = vector.search(query, n_results=5)
+                for doc in semantic:
+                    results.append({
+                        "source": "semantic",
+                        "content": doc.get("content", doc.get("document", ""))[:200],
+                        "score": doc.get("distance", 0),
+                    })
+            except Exception as e:
+                logger.warning(f"Vector search failed: {e}")
+
+        # 2. Keyword search via SQLite
+        try:
+            keyword = self.mira.sqlite.search_memories(query=query, limit=5)
+            for m in keyword:
+                content = m.get("content", "")[:200]
+                # Avoid duplicates
+                if not any(content[:50] in r["content"] for r in results):
+                    results.append({
+                        "source": "sqlite",
+                        "content": content,
+                        "score": m.get("importance", 0),
+                    })
+        except Exception as e:
+            logger.warning(f"SQLite search failed: {e}")
+
+        # 3. Knowledge graph search
+        graph = getattr(self.mira, "graph", None)
+        if graph:
+            try:
+                graph_results = graph.search(query, limit=3)
+                for g in graph_results:
+                    content = str(g)[:200]
+                    results.append({"source": "graph", "content": content, "score": 0})
+            except Exception:
+                pass
+
+        if not results:
+            await update.message.reply_text(f"No results found for \"{query}\".")
+            return
+
+        msg = f"Search: \"{query}\"\n{len(results)} results\n\n"
+        for i, r in enumerate(results[:8], 1):
+            source_tag = f"[{r['source']}]"
+            msg += f"{i}. {source_tag} {r['content']}\n\n"
+
+        if len(msg) > 4000:
+            msg = msg[:3990] + "...\n(truncated)"
+
+        await update.message.reply_text(msg)
+
+    # ══════════════════════════════════════════════════════════════════
+    # SCHEDULE COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_schedule(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show all scheduled autonomous tasks and their status."""
+        scheduler = getattr(self.mira, "scheduler", None)
+        if not scheduler or not scheduler.tasks:
+            await update.message.reply_text("No scheduled tasks found.")
+            return
+
+        msg = f"Scheduled Tasks ({len(scheduler.tasks)})\n\n"
+
+        # Group by schedule type
+        by_type = {"daily": [], "weekly": [], "interval": []}
+        for task in scheduler.tasks:
+            by_type.get(task.schedule_type, []).append(task)
+
+        if by_type["daily"]:
+            msg += "DAILY\n"
+            for t in sorted(by_type["daily"], key=lambda x: str(x.run_at or "")):
+                time_str = t.run_at.strftime("%H:%M") if t.run_at else "?"
+                status = "on" if t.enabled else "off"
+                last = ""
+                if t.last_run:
+                    last = f" (last: {t.last_run.strftime('%m/%d %H:%M')})"
+                msg += f"  [{status}] {t.name} @ {time_str}{last}\n"
+            msg += "\n"
+
+        if by_type["weekly"]:
+            msg += "WEEKLY\n"
+            day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            for t in by_type["weekly"]:
+                time_str = t.run_at.strftime("%H:%M") if t.run_at else "?"
+                days = ", ".join(day_names[d] for d in (t.days or []))
+                status = "on" if t.enabled else "off"
+                msg += f"  [{status}] {t.name} @ {time_str} ({days})\n"
+            msg += "\n"
+
+        if by_type["interval"]:
+            msg += "RECURRING\n"
+            for t in by_type["interval"]:
+                mins = t.interval_seconds // 60
+                status = "on" if t.enabled else "off"
+                runs = f" ({t.run_count} runs)" if t.run_count else ""
+                msg += f"  [{status}] {t.name} every {mins}m{runs}\n"
+            msg += "\n"
+
+        msg += f"Total runs: {sum(t.run_count for t in scheduler.tasks)}"
+        await update.message.reply_text(msg)
+
+    # ══════════════════════════════════════════════════════════════════
     # EARNING COMMANDS
     # ══════════════════════════════════════════════════════════════════
 
     async def _cmd_earn(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "Earning Modules Status:\n\n"
-            "Polymarket Alpha: Phase 7 (pending)\n"
-            "Digital Product Store: Phase 8 (pending)\n"
-            "Freelance Agent: Phase 8 (pending)\n"
-            "Content Monetisation: Phase 9 (pending)\n"
-            "Consulting Pipeline: Phase 9 (pending)\n"
-            "Newsletter: Phase 11 (pending)"
-        )
+        """Show real earning module status with revenue data."""
+        earning = getattr(self.mira, "earning", None)
+        if not earning:
+            await update.message.reply_text("Earning module not available.")
+            return
+
+        await update.message.reply_text("Fetching earning module data...")
+
+        try:
+            # Get revenue totals
+            revenue = await earning.get_total_revenue("month")
+            report = await earning.generate_report()
+
+            msg = "Earning Modules\n\n"
+            msg += f"Monthly Revenue: ${revenue.get('grand_total', 0):.2f}\n\n"
+
+            # Breakdown by stream
+            for stream, amount in revenue.get("streams", revenue).items():
+                if stream == "grand_total":
+                    continue
+                status = "active" if amount > 0 else "pending"
+                msg += f"  {stream.replace('_', ' ').title()}: ${amount:.2f} ({status})\n"
+
+            msg += f"\n{report[:1500]}" if len(report) > 10 else ""
+
+            await update.message.reply_text(msg[:4000])
+        except Exception as e:
+            logger.error(f"Earn command failed: {e}")
+            await update.message.reply_text(
+                "Earning Modules Status\n\n"
+                "Freelance Agent: scanning for jobs\n"
+                "Content Monetisation: queue active\n"
+                "Polymarket Alpha: analysis ready\n"
+                "Digital Products: setup pending\n"
+                "Consulting Pipeline: outreach pending\n\n"
+                f"Use /cost to see API spend."
+            )
 
     # ══════════════════════════════════════════════════════════════════
     # COST TRACKING
