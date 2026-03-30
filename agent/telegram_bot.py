@@ -5,8 +5,10 @@ Full command set from the MVP spec.
 
 import logging
 import os
+import sys
 import tempfile
 from datetime import datetime
+from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -105,6 +107,11 @@ class MiraTelegramBot:
         self.app.add_handler(CommandHandler("run", self._cmd_run))
         self.app.add_handler(CommandHandler("clipboard", self._cmd_clipboard))
         self.app.add_handler(CommandHandler("processes", self._cmd_processes))
+
+        # ── System Commands ─────────────────────────────────────────────
+        self.app.add_handler(CommandHandler("update", self._cmd_update))
+        self.app.add_handler(CommandHandler("restart", self._cmd_restart))
+        self.app.add_handler(CommandHandler("logs", self._cmd_logs))
 
         # ── Draft Approval (inline keyboard callbacks) ───────────────
         self.app.add_handler(CallbackQueryHandler(self._handle_draft_callback))
@@ -307,7 +314,11 @@ class MiraTelegramBot:
             "/clipboard [text] — Read or set clipboard\n"
             "/processes [name] — List running processes\n\n"
             "COST\n"
-            "/cost — API cost breakdown (today/week/month)"
+            "/cost — API cost breakdown (today/week/month)\n\n"
+            "SYSTEM\n"
+            "/update — Git pull + restart (deploy from Mac)\n"
+            "/restart — Restart Mira without pulling code\n"
+            "/logs [n] — Show last n lines of mira.log"
         )
         await update.message.reply_text(commands)
 
@@ -820,6 +831,120 @@ class MiraTelegramBot:
         if len(processes) > 40:
             msg += f"\n  ... and {len(processes) - 40} more"
         await update.message.reply_text(msg[:4000])
+
+    # ══════════════════════════════════════════════════════════════════
+    # SYSTEM COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Pull latest code from GitHub and restart Mira.
+
+        This is the remote deploy command — push from Mac, then /update on Telegram
+        to make the Windows desktop pick up the changes and restart.
+        """
+        import subprocess as sp
+        agent_dir = Path(__file__).parent
+
+        await update.message.reply_text("Pulling latest code from GitHub...")
+
+        # Step 1: git pull
+        try:
+            result = sp.run(
+                ["git", "pull", "origin", "main"],
+                cwd=str(agent_dir),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            pull_output = result.stdout.strip() or result.stderr.strip()
+            if result.returncode != 0:
+                await update.message.reply_text(
+                    f"Git pull failed (exit {result.returncode}):\n{pull_output[:1500]}"
+                )
+                return
+        except sp.TimeoutExpired:
+            await update.message.reply_text("Git pull timed out after 60s.")
+            return
+        except Exception as e:
+            await update.message.reply_text(f"Git pull error: {e}")
+            return
+
+        # Step 2: Check if anything changed
+        already_up_to_date = "Already up to date" in pull_output
+        if already_up_to_date:
+            await update.message.reply_text(
+                f"Already up to date — no changes to deploy.\n\n{pull_output[:500]}"
+            )
+            return
+
+        # Step 3: Report what changed and restart
+        await update.message.reply_text(
+            f"Code updated:\n{pull_output[:1500]}\n\n"
+            f"Restarting Mira now..."
+        )
+        self.mira.sqlite.log_action("system", "update", pull_output[:500])
+
+        # Step 4: Restart — replace the current process with a fresh one
+        await self._do_restart()
+
+    async def _cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Restart Mira without pulling code."""
+        await update.message.reply_text("Restarting Mira...")
+        self.mira.sqlite.log_action("system", "restart", "manual restart via /restart")
+        await self._do_restart()
+
+    async def _do_restart(self):
+        """Perform the actual restart — stop the bot cleanly, then os.execv into a new process."""
+        import os as _os
+
+        agent_dir = Path(__file__).parent
+        python = sys.executable
+        main_py = str(agent_dir / "main.py")
+
+        # Give Telegram a moment to deliver the reply
+        import asyncio
+        await asyncio.sleep(1)
+
+        # Stop the telegram bot gracefully
+        try:
+            await self.stop()
+        except Exception:
+            pass
+
+        # Replace the current process with a fresh python main.py
+        logger.info("Restarting via os.execv...")
+        _os.execv(python, [python, main_py])
+
+    async def _cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show the last N lines of mira.log."""
+        n = 30
+        if context.args:
+            try:
+                n = int(context.args[0])
+            except ValueError:
+                pass
+        n = min(n, 100)  # cap at 100 lines
+
+        log_path = Config.LOG_DIR / "mira.log"
+        if not log_path.exists():
+            await update.message.reply_text("No log file found.")
+            return
+
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            tail = lines[-n:]
+            text = "".join(tail)
+            if not text.strip():
+                await update.message.reply_text("Log file is empty.")
+                return
+            # Truncate if too long for Telegram
+            if len(text) > 3900:
+                text = text[-3900:]
+                text = "...(truncated)\n" + text
+            await update.message.reply_text(f"Last {len(tail)} log lines:\n\n{text}")
+        except Exception as e:
+            await update.message.reply_text(f"Failed to read logs: {e}")
 
     # ══════════════════════════════════════════════════════════════════
     # DRAFT APPROVAL (inline keyboards)

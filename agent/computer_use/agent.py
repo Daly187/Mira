@@ -187,9 +187,19 @@ class ComputerUseAgent:
                         {"summary": completion_summary},
                     )
                     logger.info(f"Task completed at step {step}: {completion_summary[:100]}")
+                    # Notify user of completion
+                    if self.mira.telegram and self.mira.telegram.chat_id:
+                        try:
+                            await self.mira.telegram.app.bot.send_message(
+                                chat_id=self.mira.telegram.chat_id,
+                                text=f"Task complete (step {step}/{max_steps}):\n{completion_summary[:500]}"
+                            )
+                        except Exception:
+                            pass
                     break
 
                 # Step 4: Execute tool actions
+                import asyncio as _aio
                 tool_results = []
                 for tool_use in tool_uses:
                     action_input = tool_use.input
@@ -204,6 +214,8 @@ class ComputerUseAgent:
                             "tool_use_id": tool_use.id,
                             "content": result or "Action executed successfully",
                         })
+                        # Brief pause so the UI has time to react before next screenshot
+                        await _aio.sleep(0.5)
                     except Exception as action_err:
                         step_info["result"] = f"error: {action_err}"
                         tool_results.append({
@@ -218,6 +230,18 @@ class ComputerUseAgent:
                         "computer_use", f"step_{step}_{action_type}",
                         step_info["result"], action_input,
                     )
+
+                    # Live progress to Telegram (every 3rd step to avoid spam)
+                    if step % 3 == 1 and self.mira.telegram and self.mira.telegram.chat_id:
+                        try:
+                            coords = action_input.get("coordinate", "")
+                            detail = f" at {coords}" if coords else ""
+                            await self.mira.telegram.app.bot.send_message(
+                                chat_id=self.mira.telegram.chat_id,
+                                text=f"Step {step}/{max_steps}: {action_type}{detail} — {step_info['result']}"
+                            )
+                        except Exception:
+                            pass
 
                 # Add tool results to conversation so Claude sees them
                 if tool_results:
@@ -249,6 +273,18 @@ class ComputerUseAgent:
                 break
 
         status = "completed" if any(s.get("action") == "completed" for s in steps_log) else "max_steps_reached"
+
+        # Notify user if we ran out of steps
+        if status == "max_steps_reached" and self.mira.telegram and self.mira.telegram.chat_id:
+            try:
+                await self.mira.telegram.app.bot.send_message(
+                    chat_id=self.mira.telegram.chat_id,
+                    text=f"Stopped after {len(steps_log)} steps (max {max_steps}).\n"
+                         f"Task may be incomplete: {task_description[:200]}"
+                )
+            except Exception:
+                pass
+
         result = {
             "status": status,
             "task": task_description,
@@ -296,7 +332,20 @@ class ComputerUseAgent:
 
         elif action == "type":
             text = action_input.get("text", "")
-            pyautogui.typewrite(text, interval=0.02)
+            # pyautogui.typewrite() only handles ASCII — use clipboard paste for
+            # Unicode and for reliability (some apps drop fast keystrokes).
+            try:
+                import pyperclip
+                old_clip = pyperclip.paste()
+                pyperclip.copy(text)
+                pyautogui.hotkey("ctrl", "v")
+                import time
+                time.sleep(0.1)
+                # Restore previous clipboard
+                pyperclip.copy(old_clip or "")
+            except ImportError:
+                # Fallback: typewrite for ASCII-only text
+                pyautogui.typewrite(text, interval=0.02)
             return f"Typed: {text[:50]}"
 
         elif action == "key":
