@@ -114,6 +114,12 @@ export const scoreDecision = (id, score, outcome) => fetchAPI(`/decisions/${id}/
   method: 'POST', body: JSON.stringify({ score, outcome }),
 })
 
+// ── Compliance ───────────────────────────────────────────────
+export const getComplianceDeadlines = () => fetchAPI('/compliance/deadlines')
+export const addComplianceDeadline = (data) => fetchAPI('/compliance/deadlines', {
+  method: 'POST', body: JSON.stringify(data),
+})
+
 // ── Earnings ─────────────────────────────────────────────────
 export const getEarnings = () => fetchAPI('/earnings')
 

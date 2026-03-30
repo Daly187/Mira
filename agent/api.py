@@ -1177,6 +1177,66 @@ async def get_schedule():
 
 
 # ═══════════════════════════════════════════════════════════════
+# COMPLIANCE
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/compliance/deadlines")
+async def get_compliance_deadlines():
+    """Get compliance deadlines from preferences."""
+    try:
+        raw = db.get_preference("compliance_deadlines")
+        if not raw:
+            return []
+        import json as _json
+        deadlines = _json.loads(raw)
+        if not isinstance(deadlines, list):
+            return []
+
+        from datetime import datetime as _dt
+        now = _dt.now()
+        for dl in deadlines:
+            try:
+                due = _dt.fromisoformat(dl.get("due_date", ""))
+                dl["days_until"] = (due - now).days
+                dl["alert_level"] = (
+                    "critical" if dl["days_until"] <= 1
+                    else "high" if dl["days_until"] <= 7
+                    else "medium" if dl["days_until"] <= 30
+                    else "low"
+                )
+            except (ValueError, TypeError):
+                dl["days_until"] = None
+                dl["alert_level"] = "unknown"
+        return sorted(deadlines, key=lambda x: x.get("days_until") or 9999)
+    except Exception:
+        return []
+
+
+@app.post("/api/compliance/deadlines")
+async def save_compliance_deadline(request: Request):
+    """Add or update a compliance deadline."""
+    try:
+        body = await request.json()
+        import json as _json
+
+        raw = db.get_preference("compliance_deadlines")
+        deadlines = _json.loads(raw) if raw else []
+
+        deadlines.append({
+            "name": body.get("name", ""),
+            "due_date": body.get("due_date", ""),
+            "jurisdiction": body.get("jurisdiction", ""),
+            "category": body.get("category", "compliance"),
+        })
+
+        db.set_preference("compliance_deadlines", _json.dumps(deadlines))
+        return {"status": "saved", "total": len(deadlines)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
 # DECISIONS
 # ═══════════════════════════════════════════════════════════════
 

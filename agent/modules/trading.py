@@ -319,23 +319,257 @@ class TradingModule:
 
     # ── Crypto / DalyKraken ──────────────────────────────────────────
 
-    async def check_dca_positions(self):
-        """Monitor all active DCA positions across exchanges."""
-        pass
+    async def check_dca_positions(self) -> list[dict]:
+        """Monitor all active DCA positions across exchanges.
 
-    async def check_dual_investments(self):
-        """15-minute cycle to check for new dual investment opportunities."""
-        pass
+        Scans the trades table for crypto positions with strategy='dca',
+        aggregates by instrument, and evaluates performance.
+
+        Returns:
+            List of DCA position summaries.
+        """
+        try:
+            rows = self.mira.sqlite.conn.execute(
+                """SELECT instrument, direction, entry_price, size, pnl,
+                          opened_at, closed_at, platform
+                   FROM trades
+                   WHERE strategy = 'dca' OR strategy LIKE '%dca%'
+                   ORDER BY opened_at DESC""",
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        if not rows:
+            return []
+
+        # Aggregate by instrument
+        positions = {}
+        for row in rows:
+            r = dict(row)
+            inst = r.get("instrument", "unknown")
+            if inst not in positions:
+                positions[inst] = {
+                    "instrument": inst,
+                    "total_size": 0.0,
+                    "total_cost": 0.0,
+                    "buy_count": 0,
+                    "realized_pnl": 0.0,
+                    "platform": r.get("platform", ""),
+                    "last_buy": r.get("opened_at"),
+                }
+            entry = r.get("entry_price", 0) or 0
+            size = r.get("size", 0) or 0
+            positions[inst]["total_size"] += size
+            positions[inst]["total_cost"] += entry * size
+            positions[inst]["buy_count"] += 1
+            if r.get("pnl"):
+                positions[inst]["realized_pnl"] += r["pnl"]
+
+        result = []
+        for inst, data in positions.items():
+            avg_entry = data["total_cost"] / data["total_size"] if data["total_size"] else 0
+            result.append({
+                "instrument": inst,
+                "total_size": round(data["total_size"], 6),
+                "avg_entry_price": round(avg_entry, 4),
+                "buy_count": data["buy_count"],
+                "realized_pnl": round(data["realized_pnl"], 2),
+                "platform": data["platform"],
+                "last_buy": data["last_buy"],
+            })
+
+        self.mira.sqlite.log_action(
+            "trading", "dca_check", f"{len(result)} DCA positions tracked",
+        )
+        return result
+
+    async def check_dual_investments(self) -> list[dict]:
+        """Check for dual investment opportunities from action_log and memories.
+
+        Scans for dual investment related entries to track active products
+        and their maturity status.
+
+        Returns:
+            List of active dual investment summaries.
+        """
+        try:
+            rows = self.mira.sqlite.conn.execute(
+                """SELECT action, outcome, created_at FROM action_log
+                   WHERE action LIKE '%dual%' OR action LIKE '%investment%'
+                   ORDER BY created_at DESC LIMIT 20""",
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        if not rows:
+            return []
+
+        entries = [dict(r) for r in rows]
+
+        # Use AI to extract structured data from action log entries
+        try:
+            prompt = f"""Extract active dual investment positions from these log entries.
+Return a JSON array of objects with: product_name, amount, strike_price, maturity_date, status.
+If no clear dual investments found, return an empty array [].
+
+Log entries:
+{json.dumps(entries[:10], default=str)}"""
+
+            response = await self.mira.brain.think(
+                message=prompt,
+                include_history=False,
+                system_override="Extract investment data. Return ONLY valid JSON array.",
+                max_tokens=512,
+                tier="fast",
+                task_type="dual_investment_check",
+            )
+
+            cleaned = response.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
+
+            result = json.loads(cleaned)
+            if isinstance(result, list):
+                return result
+        except Exception:
+            pass
+
+        return []
 
     async def get_portfolio_snapshot(self) -> dict:
-        """Real-time portfolio value across all exchanges."""
-        return {"total_value": 0.0, "positions": []}
+        """Portfolio snapshot from trades table — open positions + P&L summary.
+
+        Aggregates all open trades and recent closed trades to produce a
+        unified view of the trading portfolio.
+
+        Returns:
+            Dict with total_value, positions, daily_pnl, and summary stats.
+        """
+        open_trades = self.mira.sqlite.get_open_trades()
+        recent_closed = self.mira.sqlite.get_trade_history(limit=20)
+
+        # Calculate aggregates
+        total_unrealized = 0.0
+        total_realized = 0.0
+        positions = []
+
+        for trade in open_trades:
+            entry = trade.get("entry_price", 0) or 0
+            size = trade.get("size", 0) or 0
+            positions.append({
+                "instrument": trade.get("instrument", ""),
+                "direction": trade.get("direction", ""),
+                "entry_price": entry,
+                "size": size,
+                "strategy": trade.get("strategy", ""),
+                "platform": trade.get("platform", "mt5"),
+                "opened_at": trade.get("opened_at"),
+                "notional": round(entry * size, 2),
+            })
+
+        # Today's realized P&L from closed trades
+        today = datetime.now().strftime("%Y-%m-%d")
+        for trade in recent_closed:
+            closed_at = str(trade.get("closed_at", ""))
+            if today in closed_at:
+                pnl = trade.get("pnl", 0) or 0
+                total_realized += pnl
+
+        # Group open positions by platform
+        by_platform = {}
+        for p in positions:
+            platform = p["platform"]
+            by_platform.setdefault(platform, {"count": 0, "notional": 0.0})
+            by_platform[platform]["count"] += 1
+            by_platform[platform]["notional"] += p["notional"]
+
+        snapshot = {
+            "timestamp": datetime.now().isoformat(),
+            "open_positions": len(positions),
+            "positions": positions,
+            "daily_realized_pnl": round(total_realized, 2),
+            "platforms": by_platform,
+            "recent_closed_count": len([t for t in recent_closed if today in str(t.get("closed_at", ""))]),
+        }
+
+        self.mira.sqlite.log_action(
+            "trading", "portfolio_snapshot",
+            f"{len(positions)} open, daily P&L: ${total_realized:.2f}",
+        )
+        return snapshot
 
     # ── Polymarket ───────────────────────────────────────────────────
 
-    async def scan_polymarket(self):
-        """Scan prediction markets for mispriced probabilities."""
-        pass
+    async def scan_polymarket(self) -> list[dict]:
+        """Scan prediction markets for mispriced opportunities.
+
+        Uses brain to generate market analysis based on recent news and
+        memory signals. Returns structured list of market opportunities.
+        """
+        # Pull recent polymarket-related memories
+        memories = self.mira.sqlite.search_memories(query="polymarket prediction market", limit=10)
+        memory_texts = [m.get("content", "")[:200] for m in memories]
+
+        # Pull recent polymarket actions
+        try:
+            actions = self.mira.sqlite.conn.execute(
+                """SELECT action, outcome, created_at FROM action_log
+                   WHERE module = 'trading' AND action LIKE '%polymarket%'
+                   ORDER BY created_at DESC LIMIT 10""",
+            ).fetchall()
+            action_texts = [f"{dict(a)['action']}: {dict(a).get('outcome', '')}" for a in actions]
+        except Exception:
+            action_texts = []
+
+        # Get risk budget from preferences
+        risk_budget = self.mira.sqlite.get_preference("polymarket_risk_budget") or "100"
+
+        prompt = f"""Analyse current prediction market landscape and suggest opportunities.
+
+Context from memory:
+{chr(10).join(f'- {m}' for m in memory_texts[:5]) if memory_texts else '- No recent Polymarket memories'}
+
+Recent Polymarket activity:
+{chr(10).join(f'- {a}' for a in action_texts[:5]) if action_texts else '- No recent activity'}
+
+Risk budget: ${risk_budget}
+
+Return a JSON array (max 5 items) of market opportunities with:
+- market_name: descriptive title
+- thesis: why this is mispriced (1-2 sentences)
+- suggested_position: "yes" or "no"
+- confidence: 1-10
+- suggested_amount: dollar amount within risk budget
+- category: politics/sports/crypto/tech/science/other
+
+If insufficient data for good recommendations, return an empty array with a note.
+Return ONLY valid JSON."""
+
+        try:
+            response = await self.mira.brain.think(
+                message=prompt,
+                include_history=False,
+                system_override="You are a prediction market analyst. Return ONLY valid JSON array.",
+                max_tokens=1500,
+                tier="deep",
+                task_type="polymarket_scan",
+            )
+
+            cleaned = response.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
+
+            opportunities = json.loads(cleaned)
+            if isinstance(opportunities, list):
+                self.mira.sqlite.log_action(
+                    "trading", "polymarket_scan",
+                    f"{len(opportunities)} opportunities identified",
+                )
+                return opportunities
+        except Exception as e:
+            logger.warning(f"Polymarket scan failed: {e}")
+
+        return []
 
     async def place_polymarket_bet(
         self,
@@ -344,8 +578,66 @@ class TradingModule:
         amount: float,
         rationale: str,
     ) -> dict:
-        """Place a bet on Polymarket within risk limits."""
-        return {"status": "not_implemented"}
+        """Place a bet on Polymarket within risk limits.
+
+        Validates against risk budget, logs the bet as a trade, and
+        sends approval request via Telegram. Does NOT auto-execute —
+        requires user confirmation.
+        """
+        # Check risk budget
+        risk_budget = float(self.mira.sqlite.get_preference("polymarket_risk_budget") or "100")
+
+        # Check existing polymarket exposure
+        try:
+            rows = self.mira.sqlite.conn.execute(
+                """SELECT SUM(size) as total FROM trades
+                   WHERE platform = 'polymarket' AND closed_at IS NULL""",
+            ).fetchone()
+            current_exposure = dict(rows).get("total", 0) or 0
+        except Exception:
+            current_exposure = 0
+
+        if current_exposure + amount > risk_budget:
+            return {
+                "status": "rejected",
+                "reason": f"Would exceed risk budget (${current_exposure:.0f} + ${amount:.0f} > ${risk_budget:.0f})",
+            }
+
+        # Log as trade (pending confirmation)
+        trade_id = self.mira.sqlite.log_trade(
+            instrument=market_id,
+            direction=position,
+            entry_price=amount,
+            size=1.0,
+            strategy="polymarket",
+            rationale=rationale,
+            platform="polymarket",
+        )
+
+        # Send for approval via Telegram
+        telegram = getattr(self.mira, "telegram", None)
+        if telegram:
+            await telegram.send(
+                f"Polymarket Bet Request\n\n"
+                f"Market: {market_id}\n"
+                f"Position: {position}\n"
+                f"Amount: ${amount:.2f}\n"
+                f"Rationale: {rationale}\n\n"
+                f"Current exposure: ${current_exposure:.0f} / ${risk_budget:.0f}\n\n"
+                f"Approve? (Trade #{trade_id})"
+            )
+
+        self.mira.sqlite.log_action(
+            "trading", "polymarket_bet_request",
+            f"{market_id} {position} ${amount:.2f} (awaiting approval)",
+        )
+
+        return {
+            "status": "pending_approval",
+            "trade_id": trade_id,
+            "current_exposure": current_exposure,
+            "risk_budget": risk_budget,
+        }
 
     # ── Reports ──────────────────────────────────────────────────────
 
