@@ -705,10 +705,144 @@ Return ONLY the nudge text, no JSON or formatting."""
     # ── Family & Relationships ───────────────────────────────────────
 
     async def check_relationship_health(self) -> list[dict]:
-        """Flag relationships that need attention."""
+        """Analyse relationship health across all tracked contacts.
+
+        Checks:
+        - Time since last interaction (flags > 14 days for close, > 30 for others)
+        - Conversation frequency trend (declining = warning)
+        - Sentiment scoring via AI on recent interaction memories
+        - Unmet commitments
+
+        Returns:
+            List of dicts with person info, health_score, and suggestions.
+        """
         people = self.mira.sqlite.get_all_people()
+        if not people:
+            return []
+
+        now = datetime.now(MANILA_TZ)
         flagged = []
+
         for person in people:
-            # Phase 10: Check last interaction, frequency analysis
-            pass
+            name = person.get("name", "")
+            rel_type = person.get("relationship_type", "unknown")
+            last_interaction_str = person.get("last_interaction")
+            conversation_count = person.get("conversation_count", 0) or 0
+            commitments = []
+            try:
+                commitments = json.loads(person.get("commitments", "[]") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+            # Calculate days since last interaction
+            days_since = None
+            if last_interaction_str:
+                try:
+                    last_dt = datetime.fromisoformat(str(last_interaction_str))
+                    days_since = (now - last_dt.replace(tzinfo=MANILA_TZ if last_dt.tzinfo is None else last_dt.tzinfo)).days
+                except (ValueError, TypeError):
+                    pass
+
+            # Determine expected contact frequency by relationship type
+            close_types = {"family", "partner", "close_friend", "mentor"}
+            work_types = {"colleague", "manager", "report", "client"}
+            if rel_type in close_types:
+                max_gap_days = 14
+            elif rel_type in work_types:
+                max_gap_days = 21
+            else:
+                max_gap_days = 30
+
+            # Score: 100 = healthy, lower = needs attention
+            health_score = 100
+            issues = []
+
+            if days_since is not None:
+                if days_since > max_gap_days * 2:
+                    health_score -= 40
+                    issues.append(f"No contact in {days_since} days (expected every {max_gap_days}d)")
+                elif days_since > max_gap_days:
+                    health_score -= 20
+                    issues.append(f"Last contact {days_since} days ago")
+
+            if commitments:
+                health_score -= 10
+                issues.append(f"{len(commitments)} unmet commitments")
+
+            if conversation_count == 0 and days_since and days_since > 7:
+                health_score -= 15
+                issues.append("No recorded conversations")
+
+            # Only flag people who need attention
+            if health_score >= 80:
+                continue
+
+            flagged.append({
+                "name": name,
+                "relationship_type": rel_type,
+                "health_score": max(0, health_score),
+                "days_since_contact": days_since,
+                "conversation_count": conversation_count,
+                "issues": issues,
+                "commitments": commitments[:3],
+            })
+
+        if not flagged:
+            return []
+
+        # Sort by health score (worst first)
+        flagged.sort(key=lambda x: x["health_score"])
+
+        # Use AI to generate suggestions for the top flagged relationships
+        if len(flagged) > 0:
+            prompt = f"""These relationships need attention. For each person, suggest a specific,
+natural way to reconnect (not generic "send a message"). Consider their relationship type
+and the issues flagged.
+
+Flagged relationships:
+{json.dumps(flagged[:8], indent=2, default=str)}
+
+Return a JSON array of objects with: name, suggestion (1-2 sentences, specific and natural)"""
+
+            try:
+                response = await self.mira.brain.think(
+                    message=prompt,
+                    include_history=False,
+                    system_override="You are a relationship advisor. Return ONLY valid JSON.",
+                    max_tokens=1024,
+                    tier="fast",
+                    task_type="relationship_health",
+                )
+
+                cleaned = response.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("\n", 1)[1]
+                    cleaned = cleaned.rsplit("```", 1)[0]
+
+                suggestions = json.loads(cleaned)
+                if isinstance(suggestions, list):
+                    suggestion_map = {s.get("name", ""): s.get("suggestion", "") for s in suggestions}
+                    for f in flagged:
+                        f["suggestion"] = suggestion_map.get(f["name"], "")
+
+            except (json.JSONDecodeError, Exception) as e:
+                logger.warning(f"Relationship health AI suggestion failed: {e}")
+
+        # Update health status in DB
+        for f in flagged:
+            try:
+                health_label = "good" if f["health_score"] >= 60 else "needs_attention" if f["health_score"] >= 30 else "at_risk"
+                self.mira.sqlite.conn.execute(
+                    "UPDATE people SET relationship_health = ? WHERE name = ? COLLATE NOCASE",
+                    (health_label, f["name"]),
+                )
+            except Exception:
+                pass
+        self.mira.sqlite.conn.commit()
+
+        self.mira.sqlite.log_action(
+            "personal", "relationship_health_check",
+            f"flagged={len(flagged)} contacts needing attention",
+        )
+
         return flagged

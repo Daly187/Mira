@@ -374,7 +374,55 @@ class PAModule:
             {"email_from": email_data.get("from"), "evaluation": evaluation},
         )
 
+        # Auto-file newsletters and marketing emails
+        category = evaluation.get("category", "")
+        if category in ("newsletter", "marketing", "spam"):
+            await self._auto_file_email(email_data, category, evaluation)
+
         return evaluation
+
+    async def _auto_file_email(self, email_data: dict, category: str, evaluation: dict):
+        """Auto-label and optionally archive newsletters, marketing, and spam.
+
+        - newsletter → label "Mira/Newsletter", archive
+        - marketing → label "Mira/Marketing", archive
+        - spam → label "Mira/Spam", archive
+        """
+        if not self.gmail_service:
+            return
+
+        label_map = {
+            "newsletter": "Mira/Newsletter",
+            "marketing": "Mira/Marketing",
+            "spam": "Mira/Spam",
+        }
+
+        label_name = label_map.get(category)
+        if not label_name:
+            return
+
+        try:
+            label_id = await self._ensure_label(label_name)
+            if label_id:
+                # Apply label and remove from inbox (archive)
+                self.gmail_service.users().messages().modify(
+                    userId="me",
+                    id=email_data["id"],
+                    body={
+                        "addLabelIds": [label_id],
+                        "removeLabelIds": ["INBOX"],
+                    },
+                ).execute()
+
+                self.mira.sqlite.log_action(
+                    "pa", "email_auto_filed",
+                    f"{category}: {email_data.get('subject', '')[:60]}",
+                    {"from": email_data.get("from"), "category": category},
+                )
+                logger.info(f"Auto-filed {category} email: {email_data.get('subject', '')[:60]}")
+
+        except Exception as e:
+            logger.warning(f"Failed to auto-file {category} email: {e}")
 
     async def draft_reply(self, email_data: dict, context: str = None) -> str:
         """Draft a reply in the user's voice."""
@@ -808,6 +856,192 @@ Lean toward "ask_user" if genuinely uncertain. Only auto-accept/decline when the
             task_type="meeting_brief",
         )
 
+    # ── Post-Meeting Action Prompts ────────────────────────────────────
+
+    async def check_post_meeting_actions(self):
+        """Check if any meeting ended in the last hour and prompt for action items.
+
+        Called by scheduler every 15 minutes. Finds meetings that ended
+        within the last 60 minutes and sends a Telegram prompt asking for
+        key decisions, action items, and follow-ups.
+        """
+        if not self.calendar_service:
+            return
+
+        now = datetime.now(MANILA_TZ)
+        one_hour_ago = now - timedelta(hours=1)
+
+        try:
+            events_result = (
+                self.calendar_service.events()
+                .list(
+                    calendarId="primary",
+                    timeMin=one_hour_ago.isoformat(),
+                    timeMax=now.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+                .execute()
+            )
+        except Exception as e:
+            logger.error(f"Post-meeting check failed: {e}")
+            return
+
+        for event in events_result.get("items", []):
+            end_str = event.get("end", {}).get("dateTime")
+            if not end_str:
+                continue
+
+            try:
+                end_dt = datetime.fromisoformat(end_str)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=MANILA_TZ)
+            except (ValueError, TypeError):
+                continue
+
+            # Meeting ended between 5 and 60 minutes ago
+            minutes_since_end = (now - end_dt).total_seconds() / 60
+            if not (5 <= minutes_since_end <= 60):
+                continue
+
+            # Only for meetings I accepted
+            my_status = self._get_my_response_status(event)
+            if my_status not in ("accepted", "tentative"):
+                continue
+
+            event_id = event.get("id", "")
+            summary = event.get("summary", "(No title)")
+
+            # Skip if we already prompted for this meeting
+            already_prompted = self.mira.sqlite.conn.execute(
+                "SELECT id FROM action_log WHERE action = 'post_meeting_prompt' AND outcome LIKE ?",
+                (f"%{event_id}%",),
+            ).fetchone()
+            if already_prompted:
+                continue
+
+            # Send prompt
+            attendees = [a.get("email", "") for a in event.get("attendees", [])]
+            msg = (
+                f"Meeting just ended: {summary}\n"
+                f"Attendees: {', '.join(attendees[:5])}\n\n"
+                f"Quick capture — reply with:\n"
+                f"- Key decisions made\n"
+                f"- Action items (who owes what)\n"
+                f"- Follow-ups needed\n\n"
+                f"Or just say 'nothing' to skip."
+            )
+
+            if hasattr(self.mira, "telegram"):
+                await self.mira.telegram.send(msg)
+
+            self.mira.sqlite.log_action(
+                "pa", "post_meeting_prompt", f"event_id={event_id}: {summary[:60]}"
+            )
+
+    # ── Weekly Calendar Review ────────────────────────────────────────
+
+    async def generate_weekly_calendar_review(self) -> str:
+        """Review next week's calendar — identify conflicts, overloaded days,
+        meetings that could be emails, and prep requirements.
+        """
+        if not self.calendar_service:
+            return "Calendar service not connected."
+
+        now = datetime.now(MANILA_TZ)
+        # Next Monday through Friday
+        days_until_monday = (7 - now.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 7
+        next_monday = (now + timedelta(days=days_until_monday)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        next_friday_end = (next_monday + timedelta(days=5)).replace(
+            hour=23, minute=59, second=59
+        )
+
+        try:
+            events_result = (
+                self.calendar_service.events()
+                .list(
+                    calendarId="primary",
+                    timeMin=next_monday.isoformat(),
+                    timeMax=next_friday_end.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                    maxResults=50,
+                )
+                .execute()
+            )
+            events = events_result.get("items", [])
+        except Exception as e:
+            logger.error(f"Weekly calendar review failed: {e}")
+            return "Could not fetch next week's calendar."
+
+        if not events:
+            return f"Next week ({next_monday.strftime('%b %d')} — {next_friday_end.strftime('%b %d')}): No meetings scheduled."
+
+        # Build day-by-day summary
+        by_day = {}
+        for ev in events:
+            start = ev.get("start", {}).get("dateTime", ev.get("start", {}).get("date", ""))
+            try:
+                day = datetime.fromisoformat(start).strftime("%A %b %d")
+            except (ValueError, TypeError):
+                day = "Unknown"
+            by_day.setdefault(day, []).append({
+                "summary": ev.get("summary", "(No title)"),
+                "start": start,
+                "duration_min": self._calc_duration_min(ev),
+                "attendees": len(ev.get("attendees", [])),
+                "organizer": ev.get("organizer", {}).get("email", ""),
+            })
+
+        prompt = f"""Review next week's calendar and provide insights.
+
+Week: {next_monday.strftime('%b %d')} — {next_friday_end.strftime('%b %d, %Y')}
+
+Meetings by day:
+{json.dumps(by_day, indent=2, default=str)}
+
+Total meetings: {len(events)}
+
+Provide:
+1. Day-by-day overview (busiest day, light days)
+2. Any scheduling conflicts or back-to-back meetings without breaks
+3. Meetings with 5+ attendees that might be able to be async
+4. Prep needed (any meetings requiring research or materials)
+5. Suggested time blocks for deep work
+
+Keep it concise and actionable."""
+
+        review = await self.mira.brain.think(
+            message=prompt,
+            include_history=False,
+            max_tokens=1500,
+            tier="standard",
+            task_type="calendar_review",
+        )
+
+        self.mira.sqlite.log_action(
+            "pa", "weekly_calendar_review",
+            f"next week: {len(events)} meetings reviewed",
+        )
+        return review
+
+    def _calc_duration_min(self, event: dict) -> int:
+        """Calculate event duration in minutes."""
+        try:
+            start = event.get("start", {}).get("dateTime")
+            end = event.get("end", {}).get("dateTime")
+            if start and end:
+                s = datetime.fromisoformat(start)
+                e = datetime.fromisoformat(end)
+                return int((e - s).total_seconds() / 60)
+        except (ValueError, TypeError):
+            pass
+        return 0
+
     # ── Daily Briefing ───────────────────────────────────────────────
 
     async def generate_daily_briefing(self) -> str:
@@ -970,6 +1204,121 @@ Keep it concise and scannable. This is a weekly catch-up, not a deep dive."""
     # ── EOW Summary (Boldr) ──────────────────────────────────────────
 
     async def generate_eow_summary(self) -> str:
-        """Generate end-of-week summary for David and Andrew."""
-        # Phase 8: Pull Granola meetings, Gmail threads, synthesise
-        return "EOW summary generation coming in Phase 8."
+        """Generate end-of-week summary — pull meetings, emails, actions, tasks.
+
+        Synthesises data from the current week into a concise executive summary
+        suitable for sending to David and Andrew at Boldr.
+        """
+        now = datetime.now(MANILA_TZ)
+        # Monday of this week
+        week_start = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        week_start_str = week_start.isoformat()
+
+        # 1. Gather this week's actions
+        actions = []
+        try:
+            all_actions = self.mira.sqlite.get_daily_actions()
+            # Also pull actions from earlier in the week
+            rows = self.mira.sqlite.conn.execute(
+                "SELECT * FROM action_log WHERE created_at >= ? ORDER BY created_at",
+                (week_start_str,),
+            ).fetchall()
+            actions = [dict(r) for r in rows]
+        except Exception as e:
+            logger.warning(f"EOW: could not fetch actions: {e}")
+
+        # 2. Gather completed tasks this week
+        tasks_completed = []
+        try:
+            rows = self.mira.sqlite.conn.execute(
+                "SELECT * FROM tasks WHERE completed_at IS NOT NULL AND completed_at >= ?",
+                (week_start_str,),
+            ).fetchall()
+            tasks_completed = [dict(r) for r in rows]
+        except Exception:
+            pass
+
+        # 3. Gather this week's calendar events
+        calendar_events = []
+        try:
+            if self.calendar_service:
+                events_result = (
+                    self.calendar_service.events()
+                    .list(
+                        calendarId="primary",
+                        timeMin=week_start.isoformat() + "Z" if not week_start.tzinfo else week_start.isoformat(),
+                        timeMax=now.isoformat(),
+                        singleEvents=True,
+                        orderBy="startTime",
+                        maxResults=50,
+                    )
+                    .execute()
+                )
+                calendar_events = [
+                    {
+                        "summary": ev.get("summary", ""),
+                        "start": ev.get("start", {}).get("dateTime", ev.get("start", {}).get("date", "")),
+                        "attendees": len(ev.get("attendees", [])),
+                    }
+                    for ev in events_result.get("items", [])
+                ]
+        except Exception as e:
+            logger.warning(f"EOW: could not fetch calendar: {e}")
+
+        # 4. Gather email stats
+        email_stats = {"total_triaged": 0, "urgent": 0, "replied": 0}
+        try:
+            rows = self.mira.sqlite.conn.execute(
+                "SELECT * FROM action_log WHERE module = 'pa' AND action LIKE '%email%' AND created_at >= ?",
+                (week_start_str,),
+            ).fetchall()
+            email_stats["total_triaged"] = len([r for r in rows if "triage" in dict(r).get("action", "")])
+            email_stats["urgent"] = len([r for r in rows if "alert" in dict(r).get("action", "")])
+            email_stats["replied"] = len([r for r in rows if "sent" in dict(r).get("action", "")])
+        except Exception:
+            pass
+
+        data = {
+            "week": f"{week_start.strftime('%b %d')} — {now.strftime('%b %d, %Y')}",
+            "meetings_attended": len(calendar_events),
+            "meetings": calendar_events[:20],
+            "tasks_completed": len(tasks_completed),
+            "task_titles": [t.get("title", "") for t in tasks_completed[:15]],
+            "total_actions": len(actions),
+            "email_stats": email_stats,
+            "action_summary_by_module": {},
+        }
+
+        # Group actions by module
+        for a in actions:
+            mod = a.get("module", "other")
+            data["action_summary_by_module"].setdefault(mod, 0)
+            data["action_summary_by_module"][mod] += 1
+
+        prompt = f"""Generate a concise end-of-week summary for Boldr leadership (David and Andrew).
+
+Week data:
+{json.dumps(data, indent=2, default=str)}
+
+Format:
+1. One-line executive summary
+2. Key accomplishments (3-5 bullet points)
+3. Meetings attended this week (count + highlights)
+4. Email management (triaged, urgent, replied)
+5. Items carrying over to next week
+6. Any concerns or blockers
+
+Keep it professional, concise, and action-oriented. 300-500 words max."""
+
+        summary = await self.mira.brain.think(
+            message=prompt,
+            include_history=False,
+            max_tokens=1500,
+            tier="standard",
+            task_type="eow_summary",
+        )
+
+        self.mira.sqlite.log_action("pa", "eow_summary", "generated")
+        return summary

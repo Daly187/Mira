@@ -350,6 +350,14 @@ class Mira:
             run_at=time(8, 30),
         ))
 
+        # Post-meeting action prompts every 15 minutes
+        self.scheduler.add(ScheduledTask(
+            name="post_meeting_actions",
+            callback=self._task_post_meeting_actions,
+            schedule_type="interval",
+            interval_seconds=900,
+        ))
+
         # Habit check — gentle nudge at 12pm and 8pm
         for label, hour in [("midday", 12), ("evening", 20)]:
             self.scheduler.add(ScheduledTask(
@@ -365,6 +373,15 @@ class Mira:
             callback=self._task_presence_check,
             schedule_type="interval",
             interval_seconds=7200,
+        ))
+
+        # Relationship health check — Wednesdays at 10am
+        self.scheduler.add(ScheduledTask(
+            name="relationship_health",
+            callback=self._task_relationship_health,
+            schedule_type="weekly",
+            run_at=time(10, 0),
+            days=[2],  # Wednesday
         ))
 
         # Email check every 30 minutes
@@ -408,7 +425,13 @@ class Mira:
         self.sqlite.log_action("patterns", "weekly_review", "delivered")
 
     async def _task_calendar_review(self):
-        self.sqlite.log_action("pa", "calendar_review", "scheduled")
+        try:
+            review = await self.pa.generate_weekly_calendar_review()
+            await self.telegram.send(f"Weekly Calendar Review\n\n{review}")
+            self.sqlite.log_action("pa", "calendar_review", "delivered")
+        except Exception as e:
+            logger.error(f"Calendar review failed: {e}")
+            self.sqlite.log_action("pa", "calendar_review", f"failed: {e}")
 
     async def _task_weekly_email_digest(self):
         digest = await self.pa.generate_weekly_email_digest()
@@ -471,6 +494,32 @@ class Mira:
                     await self.telegram.send(f"Deadline Warnings\n\n{warnings}")
         except Exception as e:
             logger.debug(f"Deadline warning check skipped: {e}")
+
+    async def _task_relationship_health(self):
+        """Weekly relationship health check — flag contacts needing attention."""
+        try:
+            flagged = await self.personal.check_relationship_health()
+            if flagged:
+                msg = f"Relationship Health Check\n\n{len(flagged)} contacts need attention:\n\n"
+                for f in flagged[:5]:
+                    score = f["health_score"]
+                    label = "AT RISK" if score < 30 else "NEEDS ATTENTION"
+                    msg += f"[{label}] {f['name']} ({f['relationship_type']})\n"
+                    for issue in f["issues"][:2]:
+                        msg += f"  - {issue}\n"
+                    if f.get("suggestion"):
+                        msg += f"  Suggestion: {f['suggestion']}\n"
+                    msg += "\n"
+                await self.telegram.send(msg[:4000])
+        except Exception as e:
+            logger.error(f"Relationship health check failed: {e}")
+
+    async def _task_post_meeting_actions(self):
+        """Check for recently ended meetings and prompt for action items."""
+        try:
+            await self.pa.check_post_meeting_actions()
+        except Exception as e:
+            logger.debug(f"Post-meeting check skipped: {e}")
 
     async def _task_habit_check(self):
         """Check habits and send gentle nudges for missed ones."""

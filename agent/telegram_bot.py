@@ -993,9 +993,11 @@ class MiraTelegramBot:
         graph = getattr(self.mira, "graph", None)
         if graph:
             try:
-                graph_results = graph.search(query, limit=3)
-                for g in graph_results:
-                    content = str(g)[:200]
+                graph_results = graph.find_nodes(label_contains=query)
+                for g in graph_results[:3]:
+                    label = g.get("label", str(g))[:200]
+                    ntype = g.get("node_type", "")
+                    content = f"({ntype}) {label}" if ntype else label
                     results.append({"source": "graph", "content": content, "score": 0})
             except Exception:
                 pass
