@@ -39,10 +39,25 @@ class WhatsAppModule:
         is_group = message.get("is_group", False)
         is_voice = message.get("is_voice", False)
 
-        # Transcribe voice messages
+        # Transcribe voice messages via Whisper
         if is_voice and message.get("audio_path"):
-            # Phase 4: Whisper transcription
-            text = "Voice message (transcription pending)"
+            voice = getattr(self.mira, "voice", None)
+            if voice:
+                try:
+                    transcription = await voice.transcribe(message["audio_path"])
+                    if transcription:
+                        text = transcription
+                        self.mira.sqlite.log_action(
+                            "whatsapp", "voice_transcribed",
+                            f"from {sender}: {transcription[:100]}",
+                        )
+                    else:
+                        text = "(Voice message — transcription failed)"
+                except Exception as e:
+                    logger.error(f"WhatsApp voice transcription failed: {e}")
+                    text = "(Voice message — transcription error)"
+            else:
+                text = "(Voice message — Whisper not available)"
 
         # Classify urgency and relationship
         is_close = sender in self.close_contacts

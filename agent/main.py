@@ -400,6 +400,23 @@ class Mira:
             days=[2],  # Wednesday
         ))
 
+        # Competitive intelligence — Monday 9am
+        self.scheduler.add(ScheduledTask(
+            name="competitive_intelligence",
+            callback=self._task_competitive_intelligence,
+            schedule_type="weekly",
+            run_at=time(9, 0),
+            days=[0],  # Monday
+        ))
+
+        # Compliance deadline check — daily at 9am
+        self.scheduler.add(ScheduledTask(
+            name="compliance_check",
+            callback=self._task_compliance_check,
+            schedule_type="daily",
+            run_at=time(9, 0),
+        ))
+
         # Email check every 30 minutes
         self.scheduler.add(ScheduledTask(
             name="email_check",
@@ -560,6 +577,35 @@ class Mira:
                 await self.telegram.send(msg[:4000])
         except Exception as e:
             logger.error(f"Relationship health check failed: {e}")
+
+    async def _task_competitive_intelligence(self):
+        """Weekly competitive intelligence scan."""
+        try:
+            report = await self.personal.run_competitive_intelligence()
+            await self.telegram.send(f"Weekly Competitive Intelligence\n\n{report[:3500]}")
+            self.sqlite.log_action("personal", "competitive_intelligence", "delivered")
+        except Exception as e:
+            logger.error(f"Competitive intelligence failed: {e}")
+
+    async def _task_compliance_check(self):
+        """Daily compliance deadline check."""
+        try:
+            alerts = await self.pa.check_compliance_deadlines()
+            critical = [a for a in alerts if a.get("alert_level") == "critical"]
+            if critical:
+                msg = f"Compliance Alert — {len(critical)} critical deadlines\n\n"
+                for a in critical[:5]:
+                    days = a["days_until"]
+                    label = "OVERDUE" if days < 0 else "TOMORROW" if days <= 1 else f"in {days}d"
+                    msg += f"  [{label}] {a['name']}"
+                    if a.get("jurisdiction"):
+                        msg += f" ({a['jurisdiction']})"
+                    msg += "\n"
+                await self.telegram.send(msg)
+            elif alerts:
+                self.sqlite.log_action("pa", "compliance_check", f"{len(alerts)} upcoming deadlines (none critical)")
+        except Exception as e:
+            logger.debug(f"Compliance check skipped: {e}")
 
     async def _task_post_meeting_actions(self):
         """Check for recently ended meetings and prompt for action items."""

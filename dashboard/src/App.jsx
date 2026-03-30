@@ -2,7 +2,7 @@ import { Routes, Route, NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Brain, Users, Settings, Calendar,
   TrendingUp, DollarSign, Activity, Shield, Banknote, Key, LogOut,
-  Target, Heart, Scale
+  Target, Heart, Scale, Clock
 } from 'lucide-react'
 
 import Dashboard from './pages/Dashboard'
@@ -16,6 +16,7 @@ import EarningsPage from './pages/EarningsPage'
 import HabitsPage from './pages/HabitsPage'
 import RelationshipsPage from './pages/RelationshipsPage'
 import DecisionJournal from './pages/DecisionJournal'
+import SchedulePage from './pages/SchedulePage'
 import SettingsPage from './pages/SettingsPage'
 import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
@@ -33,6 +34,7 @@ const navItems = [
   { to: '/earnings', icon: Banknote, label: 'Earnings' },
   { to: '/costs', icon: DollarSign, label: 'Costs' },
   { to: '/actions', icon: Activity, label: 'Actions' },
+  { to: '/schedule', icon: Clock, label: 'Schedule' },
   { to: '/setup', icon: Key, label: 'Setup' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ]
@@ -98,6 +100,7 @@ function MainLayout() {
           <Route path="/earnings" element={<EarningsPage />} />
           <Route path="/costs" element={<CostTracker />} />
           <Route path="/actions" element={<ActionLog />} />
+          <Route path="/schedule" element={<SchedulePage />} />
           <Route path="/setup" element={<SetupPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

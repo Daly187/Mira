@@ -1509,3 +1509,143 @@ Keep it professional, concise, and action-oriented. 300-500 words max."""
 
         self.mira.sqlite.log_action("pa", "eow_summary", "generated")
         return summary
+
+    # ── Compliance Deadline Tracking ────────────────────────────────
+
+    async def check_compliance_deadlines(self) -> list[dict]:
+        """Check for upcoming compliance deadlines across jurisdictions.
+
+        Scans the compliance_deadlines preference (JSON array) and memories
+        tagged with compliance/legal keywords. Flags deadlines within 30, 7,
+        and 1 day windows.
+
+        Returns:
+            List of dicts with deadline info and urgency level.
+        """
+        now = datetime.now(MANILA_TZ)
+        alerts = []
+
+        # 1. Check structured deadlines from preferences
+        deadlines_raw = self.mira.sqlite.get_preference("compliance_deadlines")
+        deadlines = []
+        if deadlines_raw:
+            try:
+                deadlines = json.loads(deadlines_raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        for dl in deadlines:
+            name = dl.get("name", "Unknown deadline")
+            due_str = dl.get("due_date", "")
+            jurisdiction = dl.get("jurisdiction", "")
+            category = dl.get("category", "compliance")
+
+            try:
+                due_date = datetime.fromisoformat(due_str).replace(
+                    tzinfo=MANILA_TZ if not datetime.fromisoformat(due_str).tzinfo else datetime.fromisoformat(due_str).tzinfo
+                )
+            except (ValueError, TypeError):
+                continue
+
+            days_until = (due_date - now).days
+
+            if days_until < 0:
+                alerts.append({
+                    "name": name, "jurisdiction": jurisdiction,
+                    "category": category, "due_date": due_str,
+                    "days_until": days_until, "urgency": "overdue",
+                    "alert_level": "critical",
+                })
+            elif days_until <= 1:
+                alerts.append({
+                    "name": name, "jurisdiction": jurisdiction,
+                    "category": category, "due_date": due_str,
+                    "days_until": days_until, "urgency": "tomorrow",
+                    "alert_level": "critical",
+                })
+            elif days_until <= 7:
+                alerts.append({
+                    "name": name, "jurisdiction": jurisdiction,
+                    "category": category, "due_date": due_str,
+                    "days_until": days_until, "urgency": "this_week",
+                    "alert_level": "high",
+                })
+            elif days_until <= 30:
+                alerts.append({
+                    "name": name, "jurisdiction": jurisdiction,
+                    "category": category, "due_date": due_str,
+                    "days_until": days_until, "urgency": "this_month",
+                    "alert_level": "medium",
+                })
+
+        # 2. Scan memories for compliance-related items
+        compliance_keywords = ["compliance", "deadline", "filing", "renewal",
+                               "regulation", "audit", "tax", "license", "permit"]
+        compliance_memories = []
+        for kw in compliance_keywords:
+            try:
+                results = self.mira.sqlite.search_memories(query=kw, limit=5)
+                for r in results:
+                    content = r.get("content", "")
+                    if any(time_word in content.lower() for time_word in
+                           ["due", "deadline", "expires", "renewal", "by", "before"]):
+                        compliance_memories.append(content[:200])
+            except Exception:
+                pass
+
+        # 3. If we found memory-based signals, use AI to extract deadlines
+        if compliance_memories and not deadlines:
+            try:
+                prompt = f"""Extract any compliance deadlines from these notes.
+Return ONLY a JSON array of objects with: name, due_date (YYYY-MM-DD), jurisdiction, category.
+If no clear deadlines found, return an empty array [].
+
+Notes:
+{chr(10).join(f'- {m}' for m in compliance_memories[:10])}"""
+
+                response = await self.mira.brain.think(
+                    message=prompt,
+                    include_history=False,
+                    system_override="Extract deadlines. Return ONLY valid JSON array.",
+                    max_tokens=512,
+                    tier="fast",
+                    task_type="compliance_extract",
+                )
+
+                cleaned = response.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
+
+                extracted = json.loads(cleaned)
+                if isinstance(extracted, list):
+                    for dl in extracted:
+                        try:
+                            due_date = datetime.fromisoformat(dl["due_date"])
+                            days_until = (due_date.replace(tzinfo=MANILA_TZ) - now).days
+                            if -30 <= days_until <= 90:
+                                alert_level = "critical" if days_until <= 1 else "high" if days_until <= 7 else "medium"
+                                alerts.append({
+                                    "name": dl.get("name", ""),
+                                    "jurisdiction": dl.get("jurisdiction", ""),
+                                    "category": dl.get("category", "compliance"),
+                                    "due_date": dl["due_date"],
+                                    "days_until": days_until,
+                                    "urgency": "overdue" if days_until < 0 else "this_week" if days_until <= 7 else "this_month",
+                                    "alert_level": alert_level,
+                                    "source": "extracted_from_memory",
+                                })
+                        except (ValueError, KeyError):
+                            continue
+            except Exception as e:
+                logger.debug(f"Compliance extraction failed: {e}")
+
+        # Sort by days_until (most urgent first)
+        alerts.sort(key=lambda x: x.get("days_until", 999))
+
+        if alerts:
+            self.mira.sqlite.log_action(
+                "pa", "compliance_check",
+                f"{len(alerts)} deadlines flagged ({sum(1 for a in alerts if a['alert_level'] == 'critical')} critical)",
+            )
+
+        return alerts

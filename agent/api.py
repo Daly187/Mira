@@ -1126,20 +1126,54 @@ async def get_relationship_health():
 
 @app.get("/api/schedule")
 async def get_schedule():
-    """Get all scheduled tasks and their status."""
-    # This is a static view — the scheduler runs in the agent process.
-    # Return known schedule from action_log entries.
+    """Get all scheduled tasks — static definitions + last execution times."""
+    # Static task definitions (mirrors main.py scheduler registration)
+    task_defs = [
+        {"name": "daily_briefing", "schedule": "Daily 7:00am", "module": "pa", "description": "Morning briefing via Telegram"},
+        {"name": "ea_health", "schedule": "Every 15 min", "module": "trading", "description": "Check MT5 EA health"},
+        {"name": "daily_action_log", "schedule": "Daily 10:00pm", "module": "core", "description": "Send daily action summary"},
+        {"name": "portfolio_snapshot", "schedule": "Daily 8:00am", "module": "trading", "description": "Capture portfolio state"},
+        {"name": "weekly_review", "schedule": "Sunday 7:00pm", "module": "patterns", "description": "Weekly pattern analysis"},
+        {"name": "calendar_review", "schedule": "Sunday 6:00pm", "module": "pa", "description": "Next week calendar review"},
+        {"name": "weekly_email_digest", "schedule": "Sunday 6:00pm", "module": "pa", "description": "Low-priority email digest"},
+        {"name": "social_queue", "schedule": "Every 4 hours", "module": "social", "description": "Process content posting queue"},
+        {"name": "eow_summary", "schedule": "Friday 5:00pm", "module": "pa", "description": "End-of-week Boldr summary"},
+        {"name": "net_worth", "schedule": "Monday 8:30am", "module": "personal", "description": "Net worth snapshot update"},
+        {"name": "daily_backup", "schedule": "Daily 3:00am", "module": "core", "description": "Backup memory databases"},
+        {"name": "learning_review", "schedule": "Daily 12:00pm", "module": "learning", "description": "Spaced repetition prompts"},
+        {"name": "deadline_warnings", "schedule": "Daily 9:00am", "module": "pa", "description": "Legal/compliance deadlines"},
+        {"name": "habit_check", "schedule": "Daily 12:00pm & 8:00pm", "module": "personal", "description": "Habit completion reminders"},
+        {"name": "presence_check", "schedule": "Every 2 hours", "module": "personal", "description": "Break reminder after long work"},
+        {"name": "email_check", "schedule": "Every 30 min", "module": "pa", "description": "Gmail polling and triage"},
+        {"name": "post_meeting_actions", "schedule": "Every 15 min", "module": "pa", "description": "Post-meeting action prompts"},
+        {"name": "relationship_health", "schedule": "Wednesday 10:00am", "module": "personal", "description": "Flag neglected relationships"},
+        {"name": "monthly_learning_report", "schedule": "1st of month 9:00am", "module": "learning", "description": "Monthly learning summary"},
+        {"name": "important_dates", "schedule": "Daily 8:15am", "module": "personal", "description": "Birthday/anniversary reminders"},
+        {"name": "competitive_intelligence", "schedule": "Monday 9:00am", "module": "personal", "description": "Weekly competitor scan"},
+        {"name": "compliance_check", "schedule": "Daily 9:00am", "module": "pa", "description": "Compliance deadline tracker"},
+    ]
+
+    # Enrich with last execution time from action_log
     try:
-        rows = db.conn.execute(
-            """SELECT action, outcome, created_at FROM action_log
-               WHERE action LIKE '%_check' OR action LIKE '%_review'
-                  OR action LIKE '%briefing%' OR action LIKE '%backup%'
-                  OR action LIKE '%snapshot%' OR action LIKE '%digest%'
-               ORDER BY created_at DESC LIMIT 30"""
-        ).fetchall()
-        return [dict(r) for r in rows]
+        for task in task_defs:
+            name = task["name"]
+            row = db.conn.execute(
+                """SELECT created_at, outcome FROM action_log
+                   WHERE action LIKE ? OR action LIKE ?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (f"%{name}%", f"%{name.replace('_', ' ')}%"),
+            ).fetchone()
+            if row:
+                r = dict(row)
+                task["last_run"] = r.get("created_at")
+                task["last_outcome"] = r.get("outcome", "")[:100]
+            else:
+                task["last_run"] = None
+                task["last_outcome"] = "Never run"
     except Exception:
-        return []
+        pass
+
+    return task_defs
 
 
 # ═══════════════════════════════════════════════════════════════

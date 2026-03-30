@@ -379,26 +379,243 @@ Example: ["Still time for a quick meditation before bed — you're on a 12-day s
     # ── Financial Guardian ───────────────────────────────────────────
 
     async def get_income_overview(self) -> dict:
-        """Unified view: salary, trading P&L, crypto, side income."""
+        """Unified view: salary, trading P&L, crypto, side income.
+
+        Pulls from:
+        - Trades table for trading P&L (closed trades this month)
+        - Action log for earning module activity
+        - Preferences for salary figure
+        """
+        now = datetime.now(MANILA_TZ)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        conn = self.mira.sqlite.conn
+
+        # Trading P&L this month
+        trading_pnl = 0.0
+        try:
+            rows = conn.execute(
+                "SELECT pnl FROM trades WHERE closed_at >= ? AND pnl IS NOT NULL",
+                (month_start,),
+            ).fetchall()
+            trading_pnl = sum(r["pnl"] for r in rows)
+        except Exception:
+            pass
+
+        # Earning module revenue (from action_log)
+        side_income = 0.0
+        try:
+            rows = conn.execute(
+                """SELECT outcome FROM action_log
+                   WHERE module IN ('earning', 'freelance', 'consulting')
+                     AND action LIKE '%revenue%' AND created_at >= ?""",
+                (month_start,),
+            ).fetchall()
+            for r in rows:
+                try:
+                    val = float(r["outcome"].replace("$", "").replace(",", ""))
+                    side_income += val
+                except (ValueError, AttributeError):
+                    pass
+        except Exception:
+            pass
+
+        # Salary from preferences
+        salary = 0.0
+        try:
+            sal_pref = self.mira.sqlite.get_preference("monthly_salary")
+            if sal_pref:
+                salary = float(sal_pref)
+        except (ValueError, TypeError):
+            pass
+
+        total = salary + trading_pnl + side_income
+
         return {
-            "salary": 0,
-            "trading_pnl": 0,
-            "crypto_pnl": 0,
-            "side_income": 0,
-            "total": 0,
+            "salary": salary,
+            "trading_pnl": round(trading_pnl, 2),
+            "crypto_pnl": 0,  # Needs exchange API
+            "side_income": round(side_income, 2),
+            "total": round(total, 2),
+            "month": now.strftime("%B %Y"),
         }
 
     async def generate_monthly_pnl(self) -> str:
-        """Monthly personal P&L — where money came from, where it went."""
-        return "Monthly P&L generation coming in Phase 10."
+        """Monthly personal P&L — where money came from, where it went.
+
+        Aggregates income sources, API costs, and known expenses into
+        a concise P&L report using AI to format and provide insights.
+        """
+        now = datetime.now(MANILA_TZ)
+        income = await self.get_income_overview()
+
+        # Get API costs this month
+        api_costs = self.mira.sqlite.get_api_costs("month")
+        total_api_cost = api_costs.get("total_cost", 0) if api_costs else 0
+
+        # Get action count for activity level
+        month_start = now.replace(day=1).strftime("%Y-%m-%d")
+        conn = self.mira.sqlite.conn
+        action_count = 0
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM action_log WHERE created_at >= ?",
+                (month_start,),
+            ).fetchone()
+            action_count = row["cnt"] if row else 0
+        except Exception:
+            pass
+
+        data = {
+            "month": now.strftime("%B %Y"),
+            "income": income,
+            "expenses": {
+                "api_costs": round(total_api_cost, 2),
+                "total_known_expenses": round(total_api_cost, 2),
+            },
+            "net": round(income["total"] - total_api_cost, 2),
+            "activity": {
+                "total_actions": action_count,
+                "mira_operational_days": now.day,
+            },
+        }
+
+        prompt = f"""Generate a personal monthly P&L report.
+
+{json.dumps(data, indent=2, default=str)}
+
+Format as a concise financial summary:
+1. Income breakdown (each source with amount)
+2. Expenses breakdown
+3. Net position
+4. Key observations (trading performance, cost trends)
+5. One recommendation for next month
+
+If salary or some income sources show $0, note they need to be configured.
+Keep it clean and financial — like a personal CFO report."""
+
+        report = await self.mira.brain.think(
+            message=prompt,
+            include_history=False,
+            max_tokens=1500,
+            tier="standard",
+            task_type="monthly_pnl",
+        )
+
+        self.mira.sqlite.log_action("personal", "monthly_pnl", f"generated for {now.strftime('%B %Y')}")
+        return report
 
     async def generate_net_worth_update(self) -> str:
-        """Monday morning net worth update — all assets, all liabilities, trend."""
-        return "Net worth update coming in Phase 10."
+        """Monday morning net worth update — all assets, all liabilities, trend.
+
+        Uses income overview + trading positions for a snapshot.
+        """
+        income = await self.get_income_overview()
+        open_trades = self.mira.sqlite.get_open_trades()
+
+        data = {
+            "date": datetime.now(MANILA_TZ).strftime("%A, %B %d, %Y"),
+            "income_this_month": income,
+            "open_positions": len(open_trades),
+            "note": "Full net worth tracking requires bank API connections. "
+                    "This is a partial view based on available data.",
+        }
+
+        prompt = f"""Generate a Monday morning net worth / financial health snapshot.
+
+{json.dumps(data, indent=2, default=str)}
+
+Keep it brief (5-10 lines). Highlight:
+1. Month-to-date income
+2. Open trading positions
+3. Any concerns or actions needed
+4. What data sources are missing for a complete picture"""
+
+        report = await self.mira.brain.think(
+            message=prompt,
+            include_history=False,
+            max_tokens=800,
+            tier="fast",
+            task_type="net_worth_update",
+        )
+
+        self.mira.sqlite.log_action("personal", "net_worth_update", "delivered")
+        return report
 
     async def audit_subscriptions(self) -> list[dict]:
-        """Identify unused subscriptions for cancellation."""
-        return []
+        """Identify subscriptions from memory and action log patterns.
+
+        Scans memories and emails for recurring payment indicators
+        and surfaces them for review.
+        """
+        conn = self.mira.sqlite.conn
+        subscriptions = []
+
+        # Search memories for subscription-related content
+        sub_keywords = ["subscription", "monthly", "renewed", "billing", "charged",
+                        "recurring", "plan", "premium", "pro plan"]
+        for kw in sub_keywords:
+            try:
+                rows = conn.execute(
+                    "SELECT content, source, created_at FROM memories WHERE content LIKE ? LIMIT 5",
+                    (f"%{kw}%",),
+                ).fetchall()
+                for r in rows:
+                    content = dict(r)["content"]
+                    # Avoid duplicates
+                    if not any(content[:50] in s.get("source_text", "") for s in subscriptions):
+                        subscriptions.append({
+                            "source_text": content[:200],
+                            "detected_via": kw,
+                            "source": dict(r).get("source", "memory"),
+                            "date": dict(r).get("created_at", ""),
+                        })
+            except Exception:
+                pass
+
+        if not subscriptions:
+            return []
+
+        # Use AI to extract structured subscription data
+        prompt = f"""Extract subscription/recurring payment information from these memory snippets.
+
+{json.dumps(subscriptions[:15], indent=2, default=str)}
+
+Return a JSON array of objects with:
+- service: name of the service
+- estimated_cost: monthly cost if mentioned (null if unknown)
+- category: one of [streaming, productivity, cloud, finance, health, other]
+- still_needed: true/false/unknown — based on context, does user likely still need this?
+- recommendation: one sentence — keep, cancel, or review
+
+Only include items that are clearly subscriptions or recurring payments."""
+
+        try:
+            response = await self.mira.brain.think(
+                message=prompt,
+                include_history=False,
+                system_override="You are a financial analyst. Return ONLY valid JSON array.",
+                max_tokens=1024,
+                tier="fast",
+                task_type="subscription_audit",
+            )
+
+            cleaned = response.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1]
+                cleaned = cleaned.rsplit("```", 1)[0]
+
+            result = json.loads(cleaned)
+            if isinstance(result, list):
+                self.mira.sqlite.log_action(
+                    "personal", "subscription_audit",
+                    f"found {len(result)} subscriptions",
+                )
+                return result
+
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Subscription audit AI parse failed: {e}")
+
+        return subscriptions
 
     # ── Travel Management ────────────────────────────────────────────
 
@@ -933,3 +1150,134 @@ Return a JSON array of objects with: name, suggestion (1-2 sentences, specific a
         )
 
         return flagged
+
+    # ── Competitive Intelligence ────────────────────────────────────
+
+    async def run_competitive_intelligence(self) -> str:
+        """Weekly competitive intelligence scan.
+
+        Pulls recent memories tagged with competitor names, searches the
+        knowledge graph for company/industry connections, and generates a
+        concise report of notable moves, threats, and opportunities.
+
+        Returns:
+            Formatted competitive intelligence report string.
+        """
+        # 1. Pull competitor-related memories from the last 7 days
+        cutoff = (datetime.now(MANILA_TZ) - timedelta(days=7)).isoformat()
+        competitor_keywords = []
+        try:
+            raw = self.mira.sqlite.get_preference("competitor_keywords")
+            if raw:
+                competitor_keywords = [k.strip() for k in raw.split(",") if k.strip()]
+        except Exception:
+            pass
+
+        if not competitor_keywords:
+            competitor_keywords = ["competitor", "rival", "market share", "industry",
+                                   "launched", "acquired", "funding", "partnership"]
+
+        # Search memories for competitor signals
+        competitor_memories = []
+        for kw in competitor_keywords[:10]:
+            try:
+                results = self.mira.sqlite.search_memories(query=kw, limit=5)
+                for r in results:
+                    created = r.get("created_at", "")
+                    if created >= cutoff:
+                        competitor_memories.append(r)
+            except Exception:
+                pass
+
+        # 2. Search semantic memory for broader signals
+        vector = getattr(self.mira, "vector", None)
+        semantic_signals = []
+        if vector:
+            try:
+                results = vector.search(
+                    "competitor news industry moves market changes",
+                    n_results=10,
+                )
+                for r in results:
+                    created = r.get("created_at", "")
+                    if created >= cutoff:
+                        semantic_signals.append(r.get("content", "")[:200])
+            except Exception:
+                pass
+
+        # 3. Check knowledge graph for company connections
+        graph = getattr(self.mira, "graph", None)
+        graph_insights = []
+        if graph:
+            try:
+                company_nodes = graph.find_nodes(label_contains="company")
+                for node in company_nodes[:10]:
+                    connections = graph.get_connections(node["id"], depth=1)
+                    if connections:
+                        graph_insights.append({
+                            "entity": node.get("label", ""),
+                            "connections": len(connections),
+                        })
+            except Exception:
+                pass
+
+        # 4. Pull recent action_log entries related to industry/market
+        market_actions = []
+        try:
+            rows = self.mira.sqlite.conn.execute(
+                """SELECT action, outcome, created_at FROM action_log
+                   WHERE created_at >= ?
+                     AND (action LIKE '%market%' OR action LIKE '%trade%'
+                          OR action LIKE '%polymarket%' OR action LIKE '%news%')
+                   ORDER BY created_at DESC LIMIT 15""",
+                (cutoff,),
+            ).fetchall()
+            market_actions = [dict(r) for r in rows]
+        except Exception:
+            pass
+
+        # Deduplicate memories by content
+        seen = set()
+        unique_memories = []
+        for m in competitor_memories:
+            content = m.get("content", "")[:100]
+            if content not in seen:
+                seen.add(content)
+                unique_memories.append(m.get("content", "")[:300])
+
+        if not unique_memories and not semantic_signals and not market_actions:
+            return "No competitive intelligence signals detected this week. Consider adding competitor keywords in settings (competitor_keywords preference)."
+
+        prompt = f"""Generate a weekly competitive intelligence briefing.
+
+Data sources:
+- Memory signals ({len(unique_memories)} items): {json.dumps(unique_memories[:10], default=str)}
+- Semantic signals ({len(semantic_signals)} items): {json.dumps(semantic_signals[:5], default=str)}
+- Knowledge graph entities: {json.dumps(graph_insights[:5], default=str)}
+- Market actions this week: {json.dumps(market_actions[:10], default=str)}
+
+Format:
+1. Executive Summary (2-3 sentences)
+2. Key Competitor Moves (bullet points — what happened, why it matters)
+3. Market Trends (patterns across data sources)
+4. Threats (anything that could impact our position)
+5. Opportunities (gaps or advantages to exploit)
+6. Recommended Actions (specific, actionable next steps)
+
+Be direct and specific. If data is thin, say so — don't fabricate intelligence.
+Focus on signals that require action or awareness."""
+
+        report = await self.mira.brain.think(
+            message=prompt,
+            include_history=False,
+            max_tokens=2000,
+            tier="standard",
+            task_type="competitive_intelligence",
+        )
+
+        self.mira.sqlite.log_action(
+            "personal", "competitive_intelligence",
+            f"weekly report generated ({len(unique_memories)} memory signals, {len(semantic_signals)} semantic signals)",
+        )
+
+        return report
