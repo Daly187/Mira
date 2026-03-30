@@ -1027,6 +1027,122 @@ def get_modules():
 
 
 # ═══════════════════════════════════════════════════════════════
+# HABITS
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/habits")
+async def get_habits():
+    """Get all habits with stats."""
+    try:
+        rows = db.conn.execute("SELECT * FROM habits ORDER BY category, name").fetchall()
+        habits = []
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        for row in rows:
+            h = dict(row)
+            # Check if done today
+            done_today = db.conn.execute(
+                "SELECT id FROM habit_log WHERE habit_id = ? AND completed_at = ?",
+                (h["id"], today),
+            ).fetchone()
+            h["done_today"] = bool(done_today)
+
+            # Completions last 7 days
+            from datetime import timedelta
+            seven_days_ago = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+            h["completions_7d"] = db.conn.execute(
+                "SELECT COUNT(*) as cnt FROM habit_log WHERE habit_id = ? AND completed_at >= ?",
+                (h["id"], seven_days_ago),
+            ).fetchone()["cnt"]
+
+            habits.append(h)
+        return habits
+    except Exception as e:
+        return []
+
+
+@app.post("/api/habits/{habit_name}/log")
+async def log_habit(habit_name: str):
+    """Log a habit as done today."""
+    try:
+        row = db.conn.execute(
+            "SELECT * FROM habits WHERE name = ? COLLATE NOCASE", (habit_name,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Habit '{habit_name}' not found")
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        already = db.conn.execute(
+            "SELECT id FROM habit_log WHERE habit_id = ? AND completed_at = ?",
+            (row["id"], today),
+        ).fetchone()
+        if already:
+            return {"status": "already_logged", "streak": row["streak"]}
+
+        db.conn.execute(
+            "INSERT INTO habit_log (habit_id, completed_at) VALUES (?, ?)",
+            (row["id"], today),
+        )
+        # Simple streak increment
+        new_streak = (row["streak"] or 0) + 1
+        db.conn.execute(
+            "UPDATE habits SET streak = ?, last_completed = ? WHERE id = ?",
+            (new_streak, today, row["id"]),
+        )
+        db.conn.commit()
+        return {"status": "logged", "streak": new_streak}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
+# RELATIONSHIPS
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/relationships/health")
+async def get_relationship_health():
+    """Get people flagged for relationship attention."""
+    try:
+        rows = db.conn.execute(
+            """SELECT name, relationship_type, last_interaction, conversation_count,
+                      relationship_health, commitments
+               FROM people
+               WHERE relationship_health IN ('needs_attention', 'at_risk')
+               ORDER BY last_interaction ASC"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════
+# SCHEDULE
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/schedule")
+async def get_schedule():
+    """Get all scheduled tasks and their status."""
+    # This is a static view — the scheduler runs in the agent process.
+    # Return known schedule from action_log entries.
+    try:
+        rows = db.conn.execute(
+            """SELECT action, outcome, created_at FROM action_log
+               WHERE action LIKE '%_check' OR action LIKE '%_review'
+                  OR action LIKE '%briefing%' OR action LIKE '%backup%'
+                  OR action LIKE '%snapshot%' OR action LIKE '%digest%'
+               ORDER BY created_at DESC LIMIT 30"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════
 # WEBSOCKET — Real-time dashboard updates
 # ═══════════════════════════════════════════════════════════════
 

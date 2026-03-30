@@ -716,6 +716,29 @@ class PAModule:
         # Check for conflicts
         has_conflict = await self._check_conflict(start_str, event.get("end", ""))
 
+        # Peak cognitive window protection (9-11am Manila)
+        is_peak_window = False
+        if start_str and "T" in start_str:
+            try:
+                start_dt = datetime.fromisoformat(start_str)
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=MANILA_TZ)
+                start_manila = start_dt.astimezone(MANILA_TZ)
+                is_peak_window = 9 <= start_manila.hour < 11
+            except (ValueError, TypeError):
+                pass
+
+        # ── Rule 0: Peak cognitive window — protect deep work time ──
+        if is_peak_window and not is_urgent:
+            # Check if this is a 1:1 or a large meeting
+            attendee_count = len(event.get("attendees", []))
+            if attendee_count > 3:
+                return {
+                    "action": "ask_user",
+                    "reason": f"'{summary}' is during your peak cognitive window (9-11am). "
+                              f"Large meeting ({attendee_count} attendees) — consider rescheduling for deep work protection.",
+                }
+
         # ── Rule 1: Work hours + Boldr sender ──
         if is_work_hours and is_boldr:
             if has_conflict:
@@ -1084,6 +1107,28 @@ Keep it concise and actionable."""
         except Exception as e:
             logger.warning(f"Could not fetch calendar for briefing: {e}")
 
+        # Gather habit streaks for briefing
+        habit_streaks = []
+        try:
+            personal = getattr(self.mira, "personal", None)
+            if personal:
+                stats = await personal.get_habit_stats()
+                habit_streaks = [
+                    {"name": h["name"], "streak": h["streak"], "done_today": h["last_completed"] == now.strftime("%Y-%m-%d")}
+                    for h in stats
+                ]
+        except Exception as e:
+            logger.warning(f"Could not fetch habits for briefing: {e}")
+
+        # Gather upcoming important dates (next 7 days)
+        upcoming_dates = []
+        try:
+            personal = getattr(self.mira, "personal", None)
+            if personal:
+                upcoming_dates = await personal.get_upcoming_dates(days=7)
+        except Exception as e:
+            logger.warning(f"Could not fetch important dates for briefing: {e}")
+
         data = {
             "date": now.strftime("%A, %B %d, %Y"),
             "time": now.strftime("%H:%M"),
@@ -1095,6 +1140,8 @@ Keep it concise and actionable."""
             "memory_stats": self.mira.sqlite.get_stats(),
             "priority_emails": briefing_emails,
             "todays_calendar": calendar_events,
+            "habit_streaks": habit_streaks,
+            "upcoming_dates": upcoming_dates,
         }
 
         briefing = await self.mira.brain.generate_briefing(data)

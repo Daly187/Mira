@@ -433,15 +433,27 @@ Return JSON with:
         context: str = None,
         tone: str = "natural",
     ) -> str:
-        """Draft a reply in the user's voice. Uses SONNET — needs personality."""
+        """Draft a reply in the user's voice. Uses SONNET — needs personality.
+
+        Includes info-gap detection: if the reply requires information the user
+        hasn't provided (dates, numbers, specifics), the draft flags those gaps
+        with [NEED: ...] markers so the user can fill them before sending.
+        """
         prompt = f"""Draft a reply to this message as if you ARE the user (not as an AI assistant).
 Write in their natural voice — direct, authentic, not corporate.
 
 From: {sender}
 Message: {original_message}
 
-{"Context: " + context if context else ""}
+{"Thread context:" + chr(10) + context if context else ""}
 Tone: {tone}
+
+IMPORTANT: If the reply requires specific information you don't have (dates, numbers,
+file names, decisions, amounts, etc.), insert a placeholder like [NEED: specific info needed].
+For example: "I'll have it ready by [NEED: deadline date]" or "The budget is [NEED: amount]".
+This helps the user fill in gaps before sending.
+
+If you have all the information needed, just write the reply without any [NEED:] markers.
 
 Write ONLY the reply text, nothing else."""
 

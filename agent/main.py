@@ -375,6 +375,22 @@ class Mira:
             interval_seconds=7200,
         ))
 
+        # Monthly learning report — 1st of each month at 9am
+        self.scheduler.add(ScheduledTask(
+            name="monthly_learning_report",
+            callback=self._task_monthly_learning_report,
+            schedule_type="daily",
+            run_at=time(9, 0),
+        ))
+
+        # Important dates check — daily at 8:15am
+        self.scheduler.add(ScheduledTask(
+            name="important_dates_check",
+            callback=self._task_important_dates,
+            schedule_type="daily",
+            run_at=time(8, 15),
+        ))
+
         # Relationship health check — Wednesdays at 10am
         self.scheduler.add(ScheduledTask(
             name="relationship_health",
@@ -494,6 +510,37 @@ class Mira:
                     await self.telegram.send(f"Deadline Warnings\n\n{warnings}")
         except Exception as e:
             logger.debug(f"Deadline warning check skipped: {e}")
+
+    async def _task_monthly_learning_report(self):
+        """Generate monthly learning report — only on the 1st of each month."""
+        if datetime.now().day != 1:
+            return
+        if not self.learning:
+            return
+        try:
+            report = await self.learning.generate_monthly_report()
+            await self.telegram.send(f"Monthly Learning Report\n\n{report}")
+            self.sqlite.log_action("learning", "monthly_report", "delivered")
+        except Exception as e:
+            logger.error(f"Monthly learning report failed: {e}")
+
+    async def _task_important_dates(self):
+        """Check for upcoming important dates and send reminders."""
+        try:
+            upcoming = await self.personal.check_important_dates()
+            if upcoming:
+                msg = "Upcoming Important Dates\n\n"
+                for item in upcoming[:5]:
+                    days = item.get("days_until", "?")
+                    name = item.get("person_name", "")
+                    dtype = item.get("date_type", "").replace("_", " ")
+                    label = "TODAY" if days == 0 else f"in {days}d"
+                    msg += f"  {name} — {dtype} ({label})\n"
+                    if item.get("suggestion"):
+                        msg += f"    {item['suggestion']}\n"
+                await self.telegram.send(msg)
+        except Exception as e:
+            logger.debug(f"Important dates check skipped: {e}")
 
     async def _task_relationship_health(self):
         """Weekly relationship health check — flag contacts needing attention."""
