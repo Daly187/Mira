@@ -877,11 +877,28 @@ class MiraTelegramBot:
             )
             return
 
-        # Step 3: Report what changed and restart
-        await update.message.reply_text(
-            f"Code updated:\n{pull_output[:1500]}\n\n"
-            f"Restarting Mira now..."
-        )
+        await update.message.reply_text(f"Code updated:\n{pull_output[:1500]}")
+
+        # Step 3: Install any new dependencies
+        try:
+            req_file = agent_dir / "requirements.txt"
+            if req_file.exists():
+                await update.message.reply_text("Installing dependencies...")
+                pip_result = sp.run(
+                    [sys.executable, "-m", "pip", "install", "-r", str(req_file), "-q"],
+                    cwd=str(agent_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if pip_result.returncode != 0:
+                    pip_err = pip_result.stderr.strip()[-500:]
+                    await update.message.reply_text(f"pip install warning:\n{pip_err}")
+        except Exception as pip_e:
+            await update.message.reply_text(f"pip install skipped: {pip_e}")
+
+        # Step 4: Report and restart
+        await update.message.reply_text("Restarting Mira now...")
         self.mira.sqlite.log_action("system", "update", pull_output[:500])
 
         # Step 4: Restart — replace the current process with a fresh one

@@ -129,13 +129,13 @@ api_calls = [
     ("claude-haiku-4-5-20251001", "fast", "email_triage", 380, 150, 0.0007),
     ("claude-haiku-4-5-20251001", "fast", "entity_extraction", 490, 195, 0.0008),
     ("claude-haiku-4-5-20251001", "fast", "whatsapp_classify", 280, 120, 0.0005),
-    ("claude-sonnet-4-5-20250514", "standard", "conversation", 1200, 850, 0.016),
-    ("claude-sonnet-4-5-20250514", "standard", "conversation", 980, 620, 0.013),
-    ("claude-sonnet-4-5-20250514", "standard", "daily_briefing", 2100, 1400, 0.027),
-    ("claude-sonnet-4-5-20250514", "standard", "draft_reply", 800, 450, 0.009),
-    ("claude-sonnet-4-5-20250514", "standard", "analysis", 1500, 900, 0.018),
-    ("claude-opus-4-20250514", "deep", "deep_research", 3200, 2800, 0.258),
-    ("claude-opus-4-20250514", "deep", "polymarket_analysis", 2800, 1900, 0.185),
+    ("claude-sonnet-4-5-20250929", "standard", "conversation", 1200, 850, 0.016),
+    ("claude-sonnet-4-5-20250929", "standard", "conversation", 980, 620, 0.013),
+    ("claude-sonnet-4-5-20250929", "standard", "daily_briefing", 2100, 1400, 0.027),
+    ("claude-sonnet-4-5-20250929", "standard", "draft_reply", 800, 450, 0.009),
+    ("claude-sonnet-4-5-20250929", "standard", "analysis", 1500, 900, 0.018),
+    ("claude-opus-4-5-20251101", "deep", "deep_research", 3200, 2800, 0.258),
+    ("claude-opus-4-5-20251101", "deep", "polymarket_analysis", 2800, 1900, 0.185),
 ]
 
 for model, tier, task_type, input_tok, output_tok, cost in api_calls:

@@ -699,6 +699,33 @@ class Mira:
         if is_computer_task:
             return await self._execute_computer_task(text)
 
+        # ── Fallback: AI classification for ambiguous requests ────────
+        # If the message sounds like it wants Mira to DO something on the
+        # desktop but didn't match any keywords, use a fast Haiku call to
+        # classify it. This catches natural language like "can you check
+        # what's happening in MT5" or "go to polymarket and find good bets".
+        action_verbs = [
+            "check", "look", "see", "show", "get", "grab",
+            "put", "move", "set", "change", "update", "fix",
+            "write", "read", "send", "save", "delete", "create",
+            "install", "uninstall", "configure", "setup",
+        ]
+        has_action_verb = any(v in lower.split() for v in action_verbs)
+        # Only classify if it has an action verb AND is short enough to be a command
+        if has_action_verb and len(text.split()) <= 25:
+            try:
+                classification = await self.brain.think(
+                    f"Does this message ask me to perform a physical action on a Windows desktop "
+                    f"(click, type, open app, navigate, take screenshot, run command, etc.)? "
+                    f"Message: \"{text}\"\n\n"
+                    f"Reply with ONLY 'YES' or 'NO'.",
+                    tier="fast",
+                )
+                if classification and classification.strip().upper().startswith("YES"):
+                    return await self._execute_computer_task(text)
+            except Exception:
+                pass  # Classification failed — let it fall through to normal chat
+
         return None
 
     async def _execute_computer_task(self, text: str) -> str:

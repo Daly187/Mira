@@ -382,8 +382,8 @@ SETTINGS_SCHEMA = {
     },
     "models": {
         "model_fast": {"type": "str", "default": "claude-haiku-4-5-20251001", "label": "Fast Model (Haiku)"},
-        "model_standard": {"type": "str", "default": "claude-sonnet-4-5-20250514", "label": "Standard Model (Sonnet)"},
-        "model_deep": {"type": "str", "default": "claude-opus-4-20250514", "label": "Deep Model (Opus)"},
+        "model_standard": {"type": "str", "default": "claude-sonnet-4-5-20250929", "label": "Standard Model (Sonnet)"},
+        "model_deep": {"type": "str", "default": "claude-opus-4-5-20251101", "label": "Deep Model (Opus)"},
     },
     "polymarket": {
         "polymarket_max_bet": {"type": "float", "default": 50.0, "label": "Max Single Bet ($)"},
