@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Brain, Users, TrendingUp, DollarSign, Activity, Zap, Target, Clock, ShieldOff, ShieldCheck, AlertTriangle } from 'lucide-react'
-import { getKPIs, getRecentMemories, getActions, getKillSwitchStatus, activateKillSwitch, deactivateKillSwitch, getSetupStatus } from '../api/client'
+import { Brain, Users, TrendingUp, DollarSign, Activity, Zap, Target, Clock, ShieldOff, ShieldCheck, AlertTriangle, Calendar, Heart } from 'lucide-react'
+import { getKPIs, getRecentMemories, getActions, getKillSwitchStatus, activateKillSwitch, deactivateKillSwitch, getSetupStatus, getHabits, getScheduleHistory, getOpenTrades } from '../api/client'
 
 function KPICard({ icon: Icon, label, value, sub, color = 'text-mira-400' }) {
   return (
@@ -23,6 +23,9 @@ export default function Dashboard() {
   const [memories, setMemories] = useState([])
   const [actions, setActions] = useState([])
   const [loading, setLoading] = useState(true)
+  const [habits, setHabits] = useState([])
+  const [scheduleTasks, setScheduleTasks] = useState([])
+  const [openTrades, setOpenTrades] = useState([])
   const [killSwitchActive, setKillSwitchActive] = useState(false)
   const [showKillConfirm, setShowKillConfirm] = useState(false)
   const [killSwitchLoading, setKillSwitchLoading] = useState(false)
@@ -36,16 +39,22 @@ export default function Dashboard() {
   useEffect(() => {
     async function load() {
       try {
-        const [k, m, a, ks] = await Promise.all([
+        const [k, m, a, ks, h, st, ot] = await Promise.all([
           getKPIs(),
           getRecentMemories(5),
           getActions(),
           getKillSwitchStatus(),
+          getHabits().catch(() => []),
+          getScheduleHistory().catch(() => []),
+          getOpenTrades().catch(() => []),
         ])
         setKpis(k)
         setMemories(m)
         setActions(a)
         setKillSwitchActive(ks.kill_switch_active)
+        setHabits(h)
+        setScheduleTasks(st)
+        setOpenTrades(ot)
       } catch (e) {
         console.error('Failed to load dashboard:', e)
       }
@@ -233,7 +242,7 @@ export default function Dashboard() {
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         {/* Recent Memories */}
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
           <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
@@ -284,6 +293,99 @@ export default function Dashboard() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Bottom row — 3 quick widgets */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Habits Today */}
+        <Link to="/habits" className="bg-gray-900 border border-gray-800 rounded-xl p-5 hover:border-gray-700 transition">
+          <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-gray-400 uppercase tracking-wider">
+            <Target size={14} className="text-purple-400" />
+            Habits Today
+          </h3>
+          {habits.length === 0 ? (
+            <p className="text-gray-600 text-sm">No habits tracked yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {habits.slice(0, 5).map((h) => {
+                const today = new Date().toISOString().slice(0, 10)
+                const done = h.last_completed === today
+                return (
+                  <div key={h.id} className="flex items-center justify-between">
+                    <span className={`text-sm ${done ? 'text-green-400 line-through' : 'text-gray-300'}`}>
+                      {h.name}
+                    </span>
+                    <span className="text-xs text-gray-600">{h.streak}d streak</span>
+                  </div>
+                )
+              })}
+              {habits.length > 5 && (
+                <p className="text-xs text-gray-600">+{habits.length - 5} more</p>
+              )}
+            </div>
+          )}
+        </Link>
+
+        {/* Open Trades */}
+        <Link to="/trades" className="bg-gray-900 border border-gray-800 rounded-xl p-5 hover:border-gray-700 transition">
+          <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-gray-400 uppercase tracking-wider">
+            <TrendingUp size={14} className="text-green-400" />
+            Open Positions
+          </h3>
+          {openTrades.length === 0 ? (
+            <p className="text-gray-600 text-sm">No open positions.</p>
+          ) : (
+            <div className="space-y-2">
+              {openTrades.slice(0, 5).map((t) => (
+                <div key={t.id} className="flex items-center justify-between">
+                  <span className="text-sm text-gray-300">
+                    <span className={t.direction === 'buy' ? 'text-green-400' : 'text-red-400'}>
+                      {t.direction?.toUpperCase()}
+                    </span>{' '}
+                    {t.instrument}
+                  </span>
+                  <span className="text-xs text-gray-600">{t.size} @ {t.entry_price}</span>
+                </div>
+              ))}
+              {openTrades.length > 5 && (
+                <p className="text-xs text-gray-600">+{openTrades.length - 5} more</p>
+              )}
+            </div>
+          )}
+        </Link>
+
+        {/* Recent Schedule Activity */}
+        <Link to="/schedule" className="bg-gray-900 border border-gray-800 rounded-xl p-5 hover:border-gray-700 transition">
+          <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-gray-400 uppercase tracking-wider">
+            <Clock size={14} className="text-blue-400" />
+            Autonomous Tasks
+          </h3>
+          {scheduleTasks.length === 0 ? (
+            <p className="text-gray-600 text-sm">No scheduled tasks loaded.</p>
+          ) : (() => {
+            const recentlyRun = scheduleTasks.filter(t => {
+              if (!t.last_run) return false
+              return Date.now() - new Date(t.last_run).getTime() < 86400000
+            })
+            const neverRun = scheduleTasks.filter(t => !t.last_run)
+            return (
+              <div className="space-y-3">
+                <div className="flex justify-between">
+                  <span className="text-sm text-gray-400">Total tasks</span>
+                  <span className="text-sm font-medium text-gray-200">{scheduleTasks.length}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-sm text-gray-400">Run today</span>
+                  <span className="text-sm font-medium text-green-400">{recentlyRun.length}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-sm text-gray-400">Never run</span>
+                  <span className="text-sm font-medium text-yellow-400">{neverRun.length}</span>
+                </div>
+              </div>
+            )
+          })()}
+        </Link>
       </div>
     </div>
   )

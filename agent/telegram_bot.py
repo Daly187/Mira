@@ -127,6 +127,13 @@ class MiraTelegramBot:
         self.app.add_handler(CommandHandler("learn", self._cmd_learn))
         self.app.add_handler(CommandHandler("review", self._cmd_review))
 
+        # ── New Intelligence Commands ────────────────────────────────────
+        self.app.add_handler(CommandHandler("dca", self._cmd_dca))
+        self.app.add_handler(CommandHandler("compliance", self._cmd_compliance))
+        self.app.add_handler(CommandHandler("competitive", self._cmd_competitive))
+        self.app.add_handler(CommandHandler("subscriptions", self._cmd_subscriptions))
+        self.app.add_handler(CommandHandler("pnl", self._cmd_pnl))
+
         # ── Negotiation / Contract Commands ──────────────────────────────
         self.app.add_handler(CommandHandler("negotiate", self._cmd_negotiate))
         self.app.add_handler(CommandHandler("contract", self._cmd_contract))
@@ -2127,6 +2134,121 @@ Return JSON with:
                     os.remove(tmp_path)
                 except OSError:
                     pass
+
+    # ══════════════════════════════════════════════════════════════════
+    # INTELLIGENCE COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_dca(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show DCA position summary across instruments."""
+        trading = getattr(self.mira, "trading", None)
+        if not trading:
+            await update.message.reply_text("Trading module not available.")
+            return
+
+        await update.message.reply_text("Checking DCA positions...")
+        positions = await trading.check_dca_positions()
+
+        if not positions:
+            await update.message.reply_text("No DCA positions found. Log trades with strategy='dca' to track them.")
+            return
+
+        msg = f"DCA Positions ({len(positions)} instruments)\n\n"
+        for p in positions:
+            msg += (
+                f"  {p['instrument']} ({p['platform']})\n"
+                f"    Buys: {p['buy_count']} | Size: {p['total_size']}\n"
+                f"    Avg Entry: ${p['avg_entry_price']}\n"
+                f"    Realized P&L: ${p['realized_pnl']}\n\n"
+            )
+        await update.message.reply_text(msg[:4000])
+
+    async def _cmd_compliance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Check compliance deadlines. Usage: /compliance or /compliance add [name] [date] [jurisdiction]"""
+        args = context.args or []
+
+        if args and args[0] == "add":
+            # /compliance add Payroll Filing 2026-04-15 PH
+            if len(args) < 3:
+                await update.message.reply_text(
+                    "Usage: /compliance add [name] [YYYY-MM-DD] [jurisdiction]\n"
+                    "Example: /compliance add Payroll Filing 2026-04-15 PH"
+                )
+                return
+
+            # Parse: last arg is jurisdiction, second-to-last is date, rest is name
+            jurisdiction = args[-1] if len(args) >= 4 else ""
+            due_date = args[-2] if len(args) >= 4 else args[-1]
+            name = " ".join(args[1:-2]) if len(args) >= 4 else " ".join(args[1:-1])
+
+            import json
+            raw = self.mira.sqlite.get_preference("compliance_deadlines")
+            deadlines = json.loads(raw) if raw else []
+            deadlines.append({
+                "name": name,
+                "due_date": due_date,
+                "jurisdiction": jurisdiction,
+                "category": "compliance",
+            })
+            self.mira.sqlite.set_preference("compliance_deadlines", json.dumps(deadlines))
+            await update.message.reply_text(f"Added deadline: {name} (due {due_date}, {jurisdiction})")
+            return
+
+        pa = getattr(self.mira, "pa", None)
+        if not pa:
+            await update.message.reply_text("PA module not available.")
+            return
+
+        await update.message.reply_text("Checking compliance deadlines...")
+        alerts = await pa.check_compliance_deadlines()
+
+        if not alerts:
+            await update.message.reply_text("No compliance deadlines flagged. Use /compliance add to track one.")
+            return
+
+        msg = f"Compliance Deadlines ({len(alerts)} flagged)\n\n"
+        for a in alerts:
+            days = a["days_until"]
+            icon = "!!!" if a["alert_level"] == "critical" else "!!" if a["alert_level"] == "high" else "!"
+            label = "OVERDUE" if days < 0 else f"in {days}d"
+            msg += f"  {icon} {a['name']} — {label}"
+            if a.get("jurisdiction"):
+                msg += f" [{a['jurisdiction']}]"
+            msg += f"\n    Due: {a['due_date']}\n\n"
+        await update.message.reply_text(msg[:4000])
+
+    async def _cmd_competitive(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Run competitive intelligence scan."""
+        personal = getattr(self.mira, "personal", None)
+        if not personal:
+            await update.message.reply_text("Personal module not available.")
+            return
+
+        await update.message.reply_text("Running competitive intelligence scan... (this may take a moment)")
+        report = await personal.run_competitive_intelligence()
+        await update.message.reply_text(f"Competitive Intelligence\n\n{report[:3800]}")
+
+    async def _cmd_subscriptions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Audit active subscriptions from memory."""
+        personal = getattr(self.mira, "personal", None)
+        if not personal:
+            await update.message.reply_text("Personal module not available.")
+            return
+
+        await update.message.reply_text("Scanning memories for subscriptions...")
+        result = await personal.audit_subscriptions()
+        await update.message.reply_text(f"Subscription Audit\n\n{result[:3800]}")
+
+    async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show monthly personal P&L."""
+        personal = getattr(self.mira, "personal", None)
+        if not personal:
+            await update.message.reply_text("Personal module not available.")
+            return
+
+        await update.message.reply_text("Generating monthly P&L...")
+        report = await personal.generate_monthly_pnl()
+        await update.message.reply_text(f"Monthly P&L\n\n{report[:3800]}")
 
     # ══════════════════════════════════════════════════════════════════
     # MESSAGE HANDLER

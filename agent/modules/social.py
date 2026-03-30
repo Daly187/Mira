@@ -285,9 +285,83 @@ Write ONLY the post text. No explanations or meta-commentary."""
     # ── Engagement ────────────────────────────────────────────────────
 
     async def get_engagement_stats(self, platform: str = None) -> dict:
-        """Get engagement metrics for posts."""
-        # Phase 8: API calls to get stats
-        return {"followers": 0, "engagement_rate": 0, "posts_this_week": 0}
+        """Get engagement metrics from action_log and content_queue data.
+
+        Until platform APIs are connected (Phase 8), this derives stats from
+        internal data: posts queued/published, engagement actions logged.
+        """
+        from datetime import timedelta
+
+        now = datetime.now()
+        week_ago = (now - timedelta(days=7)).isoformat()
+        month_ago = (now - timedelta(days=30)).isoformat()
+
+        try:
+            # Posts this week (from content_queue)
+            platform_filter = ""
+            params = [week_ago]
+            if platform:
+                platform_filter = " AND platform = ?"
+                params.append(platform)
+
+            posts_week = self.mira.sqlite.conn.execute(
+                f"""SELECT COUNT(*) as cnt FROM content_queue
+                    WHERE status = 'posted' AND posted_at >= ?{platform_filter}""",
+                params,
+            ).fetchone()
+            posts_this_week = dict(posts_week).get("cnt", 0) if posts_week else 0
+
+            # Posts this month
+            params_month = [month_ago]
+            if platform:
+                params_month.append(platform)
+            posts_month = self.mira.sqlite.conn.execute(
+                f"""SELECT COUNT(*) as cnt FROM content_queue
+                    WHERE status = 'posted' AND posted_at >= ?{platform_filter}""",
+                params_month,
+            ).fetchone()
+            posts_this_month = dict(posts_month).get("cnt", 0) if posts_month else 0
+
+            # Queued (pending)
+            queued = self.mira.sqlite.conn.execute(
+                f"""SELECT COUNT(*) as cnt FROM content_queue
+                    WHERE status = 'queued'{platform_filter.replace('AND', 'AND') if platform_filter else ''}""",
+                [platform] if platform else [],
+            ).fetchone()
+            queued_count = dict(queued).get("cnt", 0) if queued else 0
+
+            # Engagement actions (replies handled)
+            engagement_actions = self.mira.sqlite.conn.execute(
+                """SELECT COUNT(*) as cnt FROM action_log
+                   WHERE module = 'social' AND action LIKE '%engagement%'
+                     AND created_at >= ?""",
+                (week_ago,),
+            ).fetchall()
+            engagements = dict(engagement_actions[0]).get("cnt", 0) if engagement_actions else 0
+
+            # Platform breakdown
+            platform_stats = {}
+            rows = self.mira.sqlite.conn.execute(
+                """SELECT platform, COUNT(*) as cnt FROM content_queue
+                   WHERE status = 'posted' AND posted_at >= ?
+                   GROUP BY platform""",
+                (month_ago,),
+            ).fetchall()
+            for row in rows:
+                r = dict(row)
+                platform_stats[r["platform"]] = r["cnt"]
+
+            return {
+                "posts_this_week": posts_this_week,
+                "posts_this_month": posts_this_month,
+                "queued": queued_count,
+                "engagements_this_week": engagements,
+                "platform_breakdown": platform_stats,
+            }
+
+        except Exception as e:
+            logger.warning(f"Failed to get engagement stats: {e}")
+            return {"posts_this_week": 0, "posts_this_month": 0, "queued": 0, "engagements_this_week": 0}
 
     async def handle_engagement(self, platform: str, interaction: dict) -> Optional[str]:
         """Handle replies, comments — auto-respond to up to ~50%.
