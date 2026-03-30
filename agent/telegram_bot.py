@@ -112,6 +112,7 @@ class MiraTelegramBot:
         self.app.add_handler(CommandHandler("update", self._cmd_update))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
         self.app.add_handler(CommandHandler("logs", self._cmd_logs))
+        self.app.add_handler(CommandHandler("version", self._cmd_version))
 
         # ── Draft Approval (inline keyboard callbacks) ───────────────
         self.app.add_handler(CallbackQueryHandler(self._handle_draft_callback))
@@ -318,7 +319,8 @@ class MiraTelegramBot:
             "SYSTEM\n"
             "/update — Git pull + restart (deploy from Mac)\n"
             "/restart — Restart Mira without pulling code\n"
-            "/logs [n] — Show last n lines of mira.log"
+            "/logs [n] — Show last n lines of mira.log\n"
+            "/version — Show current git hash and last update"
         )
         await update.message.reply_text(commands)
 
@@ -364,14 +366,30 @@ class MiraTelegramBot:
         """Generate daily briefing now."""
         await update.message.reply_text("Generating briefing...")
 
+        costs_today = self.mira.sqlite.get_api_costs("today")
+        costs_month = self.mira.sqlite.get_api_costs("month")
+
         briefing_data = {
             "date": datetime.now().strftime("%A, %B %d, %Y"),
             "time": datetime.now().strftime("%H:%M"),
+            "timezone": "Asia/Manila (UTC+8)",
             "pending_tasks": self.mira.sqlite.get_pending_tasks(),
             "open_trades": self.mira.sqlite.get_open_trades(),
-            "recent_memories": self.mira.sqlite.get_recent_memories(5),
+            "recent_memories": self.mira.sqlite.get_recent_memories(10),
             "actions_today": self.mira.sqlite.get_daily_actions(),
+            "api_cost_today": f"${costs_today['total_cost']:.4f}",
+            "api_cost_month": f"${costs_month['total_cost']:.4f}",
+            "api_calls_today": costs_today["total_calls"],
         }
+
+        # Add upcoming important dates if personal module available
+        if hasattr(self.mira, "personal") and self.mira.personal:
+            try:
+                dates = await self.mira.personal.get_upcoming_dates(days=7)
+                if dates:
+                    briefing_data["upcoming_dates"] = dates
+            except Exception:
+                pass
 
         briefing = await self.mira.brain.generate_briefing(briefing_data)
         await update.message.reply_text(briefing)
@@ -970,6 +988,64 @@ class MiraTelegramBot:
             await update.message.reply_text(f"Last {len(tail)} log lines:\n\n{text}")
         except Exception as e:
             await update.message.reply_text(f"Failed to read logs: {e}")
+
+    async def _cmd_version(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show current git commit hash and last update time."""
+        import subprocess as sp
+        agent_dir = Path(__file__).parent
+
+        try:
+            # Get current commit hash
+            hash_result = sp.run(
+                ["git", "log", "-1", "--format=%h %s", "--date=short"],
+                cwd=str(agent_dir), capture_output=True, text=True, timeout=10,
+            )
+            commit_info = hash_result.stdout.strip() if hash_result.returncode == 0 else "unknown"
+
+            # Get last commit date
+            date_result = sp.run(
+                ["git", "log", "-1", "--format=%ci"],
+                cwd=str(agent_dir), capture_output=True, text=True, timeout=10,
+            )
+            commit_date = date_result.stdout.strip() if date_result.returncode == 0 else "unknown"
+
+            # Get branch
+            branch_result = sp.run(
+                ["git", "branch", "--show-current"],
+                cwd=str(agent_dir), capture_output=True, text=True, timeout=10,
+            )
+            branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "unknown"
+
+            # Count total commits
+            count_result = sp.run(
+                ["git", "rev-list", "--count", "HEAD"],
+                cwd=str(agent_dir), capture_output=True, text=True, timeout=10,
+            )
+            commit_count = count_result.stdout.strip() if count_result.returncode == 0 else "?"
+
+            # Python version
+            import platform
+            py_version = platform.python_version()
+            os_info = platform.platform()
+
+            uptime = ""
+            if self.mira.start_time:
+                delta = datetime.now() - self.mira.start_time
+                hours, rem = divmod(int(delta.total_seconds()), 3600)
+                mins = rem // 60
+                uptime = f"{hours}h {mins}m"
+
+            await update.message.reply_text(
+                f"Mira v1.0 — Build {commit_count}\n\n"
+                f"Branch: {branch}\n"
+                f"Last commit: {commit_info}\n"
+                f"Date: {commit_date}\n\n"
+                f"Runtime: Python {py_version}\n"
+                f"OS: {os_info}\n"
+                f"Uptime: {uptime or 'N/A'}"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Version check failed: {e}")
 
     # ══════════════════════════════════════════════════════════════════
     # DRAFT APPROVAL (inline keyboards)
