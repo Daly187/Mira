@@ -3,6 +3,7 @@ Mira Telegram Bot — primary interface for commands, notifications, and communi
 Full command set from the MVP spec.
 """
 
+import json
 import logging
 import os
 import sys
@@ -113,6 +114,7 @@ class MiraTelegramBot:
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
         self.app.add_handler(CommandHandler("logs", self._cmd_logs))
         self.app.add_handler(CommandHandler("version", self._cmd_version))
+        self.app.add_handler(CommandHandler("ask", self._cmd_ask))
 
         # ── Draft Approval (inline keyboard callbacks) ───────────────
         self.app.add_handler(CallbackQueryHandler(self._handle_draft_callback))
@@ -320,7 +322,8 @@ class MiraTelegramBot:
             "/update — Git pull + restart (deploy from Mac)\n"
             "/restart — Restart Mira without pulling code\n"
             "/logs [n] — Show last n lines of mira.log\n"
-            "/version — Show current git hash and last update"
+            "/version — Show current git hash and last update\n"
+            "/ask [question] — Screenshot + AI analysis"
         )
         await update.message.reply_text(commands)
 
@@ -426,7 +429,31 @@ class MiraTelegramBot:
         await update.message.reply_text("Trading execution resumed.")
 
     async def _cmd_daily_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Trading report generation coming in Phase 7.")
+        """Generate today's trading report from logged trades and risk data."""
+        await update.message.reply_text("Generating trading report...")
+
+        open_trades = self.mira.sqlite.get_open_trades()
+        trade_history = self.mira.sqlite.get_trade_history(limit=20)
+        session_info = self.mira.trading.get_current_session() if hasattr(self.mira.trading, "get_current_session") else {}
+
+        report_data = {
+            "date": datetime.now().strftime("%A, %B %d, %Y"),
+            "open_positions": len(open_trades),
+            "open_trades": open_trades,
+            "recent_closed": [t for t in trade_history if t.get("closed_at")],
+            "session": session_info,
+            "risk_limit": Config.MAX_DAILY_DRAWDOWN_PCT if hasattr(Config, "MAX_DAILY_DRAWDOWN_PCT") else "3%",
+        }
+
+        report = await self.mira.brain.think(
+            f"Generate a concise daily trading report based on this data:\n"
+            f"{json.dumps(report_data, indent=2, default=str)}\n\n"
+            f"Include: open positions summary, today's P&L if available, "
+            f"current session context, risk status, and any notable observations. "
+            f"Be direct and data-driven. Use your Mira personality.",
+            tier="standard",
+        )
+        await update.message.reply_text(report)
 
     async def _cmd_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
@@ -442,7 +469,21 @@ class MiraTelegramBot:
             await update.message.reply_text("Invalid number. Usage: /risk 3.0")
 
     async def _cmd_portfolio(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Crypto portfolio view coming in Phase 7 (DalyKraken integration).")
+        """Show all tracked positions — MT5 + crypto."""
+        open_trades = self.mira.sqlite.get_open_trades()
+        if not open_trades:
+            await update.message.reply_text("No open positions tracked.\n\nLog trades via /remember or the trading module.")
+            return
+
+        msg = f"Portfolio — {len(open_trades)} open positions\n\n"
+        for t in open_trades:
+            direction = t.get("direction", "?").upper()
+            instrument = t.get("instrument", "?")
+            entry = t.get("entry_price", "?")
+            size = t.get("size", "?")
+            msg += f"  {direction} {instrument} @ {entry} (size: {size})\n"
+
+        await update.message.reply_text(msg[:4000])
 
     # ══════════════════════════════════════════════════════════════════
     # SOCIAL COMMANDS
@@ -861,6 +902,35 @@ class MiraTelegramBot:
     # ══════════════════════════════════════════════════════════════════
     # SYSTEM COMMANDS
     # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_ask(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Take a screenshot and answer a question about what's on screen."""
+        question = " ".join(context.args) if context.args else "What's currently visible on screen?"
+
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu or not cu.client:
+            await update.message.reply_text("Computer use not available.")
+            return
+
+        await update.message.reply_text("Looking at the screen...")
+
+        # Take screenshot and send it
+        path = await cu.screenshot_to_file()
+        if path:
+            try:
+                with open(path, "rb") as photo:
+                    await self.app.bot.send_photo(
+                        chat_id=update.effective_chat.id, photo=photo,
+                    )
+            except Exception:
+                pass
+            finally:
+                if os.path.exists(path):
+                    os.remove(path)
+
+        # Analyse with Claude Vision
+        analysis = await cu.analyse_screen(task=question)
+        await update.message.reply_text(analysis[:4000])
 
     async def _cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Pull latest code from GitHub and restart Mira.
