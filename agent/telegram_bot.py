@@ -75,6 +75,10 @@ class MiraTelegramBot:
 
         # ── Social Commands ──────────────────────────────────────────
         self.app.add_handler(CommandHandler("post", self._cmd_post))
+        self.app.add_handler(CommandHandler("queue", self._cmd_queue))
+
+        # ── CRM Commands ──────────────────────────────────────────────
+        self.app.add_handler(CommandHandler("people", self._cmd_people))
 
         # ── Finance Commands ─────────────────────────────────────────
         self.app.add_handler(CommandHandler("budget", self._cmd_budget))
@@ -292,7 +296,11 @@ class MiraTelegramBot:
             "/risk [%] — Update daily drawdown limit\n"
             "/portfolio — Show full crypto portfolio\n\n"
             "SOCIAL\n"
-            "/post [platform] [content] — Draft and queue a post\n\n"
+            "/post [platform] [content] — Draft and queue a post\n"
+            "/queue — Show pending posts in content queue\n\n"
+            "CRM\n"
+            "/people — List all tracked people\n"
+            "/people [name] — Look up a specific person\n\n"
             "FINANCE\n"
             "/budget — This month's personal P&L\n"
             "/networth — Current net worth snapshot\n\n"
@@ -490,12 +498,118 @@ class MiraTelegramBot:
     # ══════════════════════════════════════════════════════════════════
 
     async def _cmd_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if len(context.args) < 2:
-            await update.message.reply_text("Usage: /post [platform] [content]\nPlatforms: x, linkedin, instagram, tiktok, youtube, facebook")
+        """Draft or queue a social media post."""
+        if not context.args:
+            await update.message.reply_text(
+                "Usage:\n"
+                "  /post x [content] — Queue a post for X/Twitter\n"
+                "  /post linkedin [content] — Queue for LinkedIn\n"
+                "  /post x — Auto-generate content for X\n\n"
+                "Platforms: x, linkedin, instagram, tiktok, youtube, facebook"
+            )
             return
-        platform = context.args[0]
-        content = " ".join(context.args[1:])
-        await update.message.reply_text(f"Social posting coming in Phase 8.\nQueued for {platform}: {content[:100]}...")
+
+        platform = context.args[0].lower()
+        valid = ["x", "linkedin", "instagram", "tiktok", "youtube", "facebook"]
+        if platform not in valid:
+            await update.message.reply_text(f"Unknown platform '{platform}'. Options: {', '.join(valid)}")
+            return
+
+        content = " ".join(context.args[1:]) if len(context.args) > 1 else None
+
+        if not content:
+            # Auto-generate content
+            await update.message.reply_text(f"Generating {platform} content...")
+            result = await self.mira.social.generate_content(platform=platform)
+            content = result.get("content", "")
+            if not content:
+                await update.message.reply_text("Content generation failed.")
+                return
+            # Send as draft for approval
+            await self.send_draft_for_approval(
+                draft_text=content,
+                draft_type="social_post",
+                metadata={"platform": platform},
+            )
+            return
+
+        # Queue the post directly
+        result = await self.mira.social.queue_post(platform=platform, content=content)
+        await update.message.reply_text(
+            f"Queued for {platform} (post #{result['id']})\n"
+            f"Scheduled: {result['scheduled_at'][:16]}\n\n"
+            f"{content[:200]}"
+        )
+
+    async def _cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show pending social media posts in the queue."""
+        posts = await self.mira.social.get_pending_posts()
+        if not posts:
+            await update.message.reply_text("No posts in queue.\n\nUse /post [platform] [content] to add one.")
+            return
+
+        msg = f"Content Queue ({len(posts)} pending):\n\n"
+        for p in posts[:10]:
+            msg += (
+                f"  #{p['id']} [{p['platform']}] {p['scheduled_at'][:16]}\n"
+                f"  {p['content'][:80]}...\n\n"
+            )
+        if len(posts) > 10:
+            msg += f"  ...and {len(posts) - 10} more"
+        await update.message.reply_text(msg[:4000])
+
+    # ══════════════════════════════════════════════════════════════════
+    # FINANCE COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_people(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """CRM — list people or look up a specific person."""
+        if context.args:
+            name = " ".join(context.args)
+            person = self.mira.sqlite.get_person(name)
+            if not person:
+                await update.message.reply_text(f"No one named '{name}' in CRM.\n\nUse /remember to add people.")
+                return
+            msg = f"Person: {person.get('name', name)}\n"
+            msg += f"Type: {person.get('relationship_type', 'unknown')}\n"
+            if person.get('email'):
+                msg += f"Email: {person['email']}\n"
+            if person.get('phone'):
+                msg += f"Phone: {person['phone']}\n"
+            if person.get('key_facts'):
+                facts = person['key_facts']
+                if isinstance(facts, str):
+                    try:
+                        facts = json.loads(facts)
+                    except Exception:
+                        facts = [facts]
+                if facts:
+                    msg += f"\nKey facts:\n"
+                    for f in facts[:10]:
+                        msg += f"  - {f}\n"
+            if person.get('last_contact'):
+                msg += f"\nLast contact: {person['last_contact']}"
+            await update.message.reply_text(msg[:4000])
+            return
+
+        # List all people
+        people = self.mira.sqlite.get_all_people()
+        if not people:
+            await update.message.reply_text("CRM is empty.\n\nMira learns people from your conversations automatically.")
+            return
+
+        msg = f"People ({len(people)}):\n\n"
+        for p in people[:30]:
+            ptype = p.get('relationship_type', '')
+            pname = p.get('name', '?')
+            msg += f"  {pname}"
+            if ptype:
+                msg += f" ({ptype})"
+            msg += "\n"
+        if len(people) > 30:
+            msg += f"\n  ...and {len(people) - 30} more"
+        msg += "\n\nUsage: /people [name] for details"
+        await update.message.reply_text(msg[:4000])
 
     # ══════════════════════════════════════════════════════════════════
     # FINANCE COMMANDS

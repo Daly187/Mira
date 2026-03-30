@@ -37,14 +37,67 @@ class TradingModule:
     # ── MT5 Operations (via Computer Use) ────────────────────────────
 
     async def check_ea_health(self):
-        """Check all running EAs every 15 minutes, restart any that crashed."""
-        # Phase 7: Computer use to screenshot MT5, check EA status
-        pass
+        """Check all running EAs every 15 minutes via computer use.
+
+        Takes a screenshot of MT5, uses Claude Vision to check EA status,
+        and alerts if any EA appears stopped or errored.
+        """
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu or not cu.client:
+            return
+
+        try:
+            # Focus MT5 window first
+            await cu.focus_window("MetaTrader")
+            import asyncio
+            await asyncio.sleep(1)
+
+            analysis = await cu.analyse_screen(
+                task="Look at the MetaTrader 5 window. Check: "
+                     "1. Are any Expert Advisors (EAs) running? "
+                     "2. Do any show errors or stopped status? "
+                     "3. What is the current account balance and equity? "
+                     "4. Are there any open positions? "
+                     "Report concisely."
+            )
+
+            if analysis and not analysis.startswith("Could not"):
+                self.mira.sqlite.log_action("trading", "ea_health_check", analysis[:300])
+
+                # Alert if something looks wrong
+                lower = analysis.lower()
+                if any(w in lower for w in ["error", "stopped", "crashed", "disconnected", "no connection"]):
+                    if hasattr(self.mira, "telegram"):
+                        await self.mira.telegram.notify(
+                            "trading",
+                            "EA Health Alert",
+                            analysis[:500],
+                        )
+        except Exception as e:
+            logger.error(f"EA health check failed: {e}")
 
     async def read_dashboard(self) -> dict:
-        """Read MT5 dashboard — open positions, P&L, margin levels."""
-        # Phase 7: Screenshot MT5, parse with Claude vision
-        return {"positions": [], "pnl": 0.0, "margin_level": 0.0}
+        """Read MT5 dashboard via screenshot + Claude Vision."""
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu or not cu.client:
+            return {"positions": [], "pnl": 0.0, "margin_level": 0.0}
+
+        try:
+            await cu.focus_window("MetaTrader")
+            import asyncio
+            await asyncio.sleep(1)
+
+            analysis = await cu.analyse_screen(
+                task="Read the MetaTrader 5 dashboard. Extract: "
+                     "1. All open positions (instrument, direction, size, entry price, current P&L) "
+                     "2. Account balance and equity "
+                     "3. Margin level "
+                     "Return as structured data."
+            )
+            return {"raw_analysis": analysis, "source": "computer_use"}
+        except Exception as e:
+            logger.error(f"Read dashboard failed: {e}")
+            return {"positions": [], "pnl": 0.0, "margin_level": 0.0}
 
     # ── Session Awareness ────────────────────────────────────────────
 
@@ -169,8 +222,32 @@ class TradingModule:
 
     async def send_daily_screenshot(self):
         """Screenshot MT5 dashboard and send to Telegram at market close."""
-        # Phase 7: Computer use screenshot + Telegram send
-        pass
+        cu = getattr(self.mira, "computer_use", None)
+        if not cu or not cu.client:
+            return
+
+        try:
+            # Focus MT5
+            await cu.focus_window("MetaTrader")
+            import asyncio
+            await asyncio.sleep(1)
+
+            # Take and send screenshot
+            path = await cu.screenshot_to_file()
+            if path and hasattr(self.mira, "telegram") and self.mira.telegram.chat_id:
+                import os
+                try:
+                    with open(path, "rb") as photo:
+                        await self.mira.telegram.app.bot.send_photo(
+                            chat_id=self.mira.telegram.chat_id, photo=photo,
+                            caption="MT5 Daily Screenshot"
+                        )
+                    self.mira.sqlite.log_action("trading", "daily_screenshot", "sent")
+                finally:
+                    if os.path.exists(path):
+                        os.remove(path)
+        except Exception as e:
+            logger.error(f"Daily screenshot failed: {e}")
 
     def _risk_check(self, instrument: str, direction: str, proposed_size: float) -> tuple[bool, str]:
         """Enforce risk limits — hard stop, no overrides.
