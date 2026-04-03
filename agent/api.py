@@ -516,14 +516,28 @@ SETTINGS_SCHEMA = {
 
 # ── ENV KEY SETUP SCHEMA ──────────────────────────────────────
 ENV_KEYS_SCHEMA = [
+    # Core
     {"key": "ANTHROPIC_API_KEY", "label": "Anthropic API Key", "group": "core", "required": True, "test_service": "anthropic", "help": "Get from console.anthropic.com"},
     {"key": "TELEGRAM_BOT_TOKEN", "label": "Telegram Bot Token", "group": "core", "required": True, "test_service": "telegram_bot", "help": "Create via @BotFather on Telegram"},
     {"key": "TELEGRAM_CHAT_ID", "label": "Telegram Chat ID", "group": "core", "required": True, "test_service": "telegram_chat", "help": "Your numeric Telegram user ID (send /start to @userinfobot)"},
+    {"key": "API_TOKEN", "label": "Dashboard API Token", "group": "core", "required": True, "test_service": None, "help": "Secret token for dashboard authentication (any strong string)"},
+    # Telegram Userbot
+    {"key": "TG_API_ID", "label": "Telegram API ID", "group": "telegram", "required": False, "test_service": "telegram_userbot", "help": "Get from my.telegram.org → API development tools"},
+    {"key": "TG_API_HASH", "label": "Telegram API Hash", "group": "telegram", "required": False, "test_service": None, "help": "Get from my.telegram.org → API development tools"},
+    {"key": "TG_PHONE", "label": "Telegram Phone Number", "group": "telegram", "required": False, "test_service": None, "help": "Your phone with country code, e.g. +639171234567"},
+    {"key": "TG_SYNC_INTERVAL", "label": "Sync Interval (seconds)", "group": "telegram", "required": False, "test_service": None, "help": "How often to sync conversations (default 300 = 5 min)"},
+    # Local Model
+    {"key": "LOCAL_MODEL_ENABLED", "label": "Enable Local Model", "group": "local_model", "required": False, "test_service": "local_model", "help": "Set to 'true' to use Ollama for simple tasks ($0 cost)"},
+    {"key": "LOCAL_MODEL_URL", "label": "Ollama URL", "group": "local_model", "required": False, "test_service": None, "help": "Default: http://localhost:11434"},
+    {"key": "LOCAL_MODEL_NAME", "label": "Model Name", "group": "local_model", "required": False, "test_service": None, "help": "e.g. phi3:mini, llama3:8b — run 'ollama list' to see available"},
+    # Voice
     {"key": "ELEVENLABS_API_KEY", "label": "ElevenLabs API Key", "group": "voice", "required": False, "test_service": "elevenlabs", "help": "For voice synthesis — elevenlabs.io"},
     {"key": "ELEVENLABS_VOICE_ID", "label": "ElevenLabs Voice ID", "group": "voice", "required": False, "test_service": None, "help": "Voice ID from ElevenLabs dashboard"},
+    # Google
     {"key": "GOOGLE_CREDENTIALS_PATH", "label": "Google Credentials Path", "group": "google", "required": False, "test_service": None, "help": "Path to OAuth credentials JSON file"},
-    {"key": "ENCRYPT_KEY", "label": "Encryption Key", "group": "security", "required": False, "test_service": None, "help": "AES-256 key for data at rest encryption"},
     {"key": "PRIORITY_SENDERS", "label": "Priority Email Senders", "group": "google", "required": False, "test_service": None, "help": "Comma-separated emails that bypass work-hours rules"},
+    # Security
+    {"key": "ENCRYPT_KEY", "label": "Encryption Key", "group": "security", "required": False, "test_service": None, "help": "AES-256 key for data at rest encryption"},
 ]
 
 
@@ -696,6 +710,41 @@ async def test_setup_service(service: str):
                 if resp.status_code == 200:
                     return {"service": service, "status": "ok", "message": "Connected to ElevenLabs"}
                 return {"service": service, "status": "error", "message": f"Auth failed (HTTP {resp.status_code})"}
+
+        elif service == "telegram_userbot":
+            api_id = env_values.get("TG_API_ID", "")
+            api_hash = env_values.get("TG_API_HASH", "")
+            phone = env_values.get("TG_PHONE", "")
+            if not api_id or not api_hash:
+                return {"service": service, "status": "error", "message": "API ID and Hash required — get from my.telegram.org"}
+            if not phone:
+                return {"service": service, "status": "error", "message": "Phone number not configured"}
+            # Check if userbot is connected (if agent is running)
+            if hasattr(app.state, "mira") and hasattr(app.state.mira, "userbot"):
+                ub = app.state.mira.userbot
+                if hasattr(ub, "available") and ub.available:
+                    return {"service": service, "status": "ok", "message": "Userbot connected and running"}
+            return {"service": service, "status": "ok", "message": f"Keys configured for {phone} — start agent to connect"}
+
+        elif service == "local_model":
+            if not httpx:
+                return {"service": service, "status": "error", "message": "httpx not installed"}
+            enabled = env_values.get("LOCAL_MODEL_ENABLED", "false").lower() == "true"
+            if not enabled:
+                return {"service": service, "status": "error", "message": "Local model disabled — set LOCAL_MODEL_ENABLED=true"}
+            url = env_values.get("LOCAL_MODEL_URL", "http://localhost:11434")
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(f"{url}/api/tags")
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        models = [m.get("name", "?") for m in data.get("models", [])]
+                        if models:
+                            return {"service": service, "status": "ok", "message": f"Ollama running — models: {', '.join(models[:5])}"}
+                        return {"service": service, "status": "ok", "message": "Ollama running but no models pulled. Run: ollama pull phi3:mini"}
+                    return {"service": service, "status": "error", "message": f"Ollama returned HTTP {resp.status_code}"}
+            except Exception:
+                return {"service": service, "status": "error", "message": f"Cannot reach Ollama at {url} — is it running?"}
 
         else:
             return {"service": service, "status": "error", "message": f"Unknown service: {service}"}

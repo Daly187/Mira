@@ -244,6 +244,156 @@ class SQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_telegram_messages_tg_id ON telegram_messages(telegram_message_id);
             CREATE INDEX IF NOT EXISTS idx_scheduled_messages_send_at ON scheduled_messages(send_at);
             CREATE INDEX IF NOT EXISTS idx_scheduled_messages_status ON scheduled_messages(status);
+
+            -- Email accounts: multi-account Gmail support
+            CREATE TABLE IF NOT EXISTS email_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_address TEXT UNIQUE NOT NULL,
+                display_name TEXT DEFAULT '',
+                account_type TEXT DEFAULT 'personal',
+                credentials_file TEXT NOT NULL,
+                token_file TEXT NOT NULL,
+                last_sync_at TIMESTAMP,
+                last_full_import_at TIMESTAMP,
+                sync_enabled INTEGER DEFAULT 1,
+                import_days INTEGER DEFAULT 90,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT DEFAULT '{}'
+            );
+
+            -- Email contacts: per-contact autonomy + relationship data
+            CREATE TABLE IF NOT EXISTS email_contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_address TEXT UNIQUE NOT NULL,
+                display_name TEXT DEFAULT '',
+                person_id INTEGER,
+                autonomy_level TEXT DEFAULT 'review_first',
+                relationship_type TEXT DEFAULT 'unknown',
+                domain TEXT DEFAULT '',
+                first_seen_at TIMESTAMP,
+                last_email_at TIMESTAMP,
+                email_count_sent INTEGER DEFAULT 0,
+                email_count_received INTEGER DEFAULT 0,
+                avg_response_time_hours REAL,
+                sentiment_trend TEXT DEFAULT 'neutral',
+                topics TEXT DEFAULT '[]',
+                key_facts TEXT DEFAULT '[]',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT DEFAULT '{}',
+                FOREIGN KEY (person_id) REFERENCES people(id)
+            );
+
+            -- Processed emails: dedup + extraction tracking
+            CREATE TABLE IF NOT EXISTS processed_emails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                gmail_message_id TEXT NOT NULL,
+                gmail_thread_id TEXT NOT NULL,
+                from_address TEXT,
+                to_addresses TEXT DEFAULT '[]',
+                cc_addresses TEXT DEFAULT '[]',
+                subject TEXT,
+                date_sent TIMESTAMP,
+                body_preview TEXT,
+                extraction_status TEXT DEFAULT 'pending',
+                extraction_data TEXT DEFAULT '{}',
+                has_attachments INTEGER DEFAULT 0,
+                attachment_metadata TEXT DEFAULT '[]',
+                urgency INTEGER DEFAULT 3,
+                importance INTEGER DEFAULT 3,
+                category TEXT DEFAULT 'general',
+                memory_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(account_id, gmail_message_id),
+                FOREIGN KEY (account_id) REFERENCES email_accounts(id)
+            );
+
+            -- Email thread summaries: AI-generated thread overviews
+            CREATE TABLE IF NOT EXISTS email_threads_summary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                gmail_thread_id TEXT NOT NULL,
+                subject TEXT,
+                participants TEXT DEFAULT '[]',
+                message_count INTEGER DEFAULT 0,
+                summary TEXT DEFAULT '',
+                topics TEXT DEFAULT '[]',
+                commitments TEXT DEFAULT '[]',
+                status TEXT DEFAULT 'active',
+                first_message_at TIMESTAMP,
+                last_message_at TIMESTAMP,
+                last_summarized_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(account_id, gmail_thread_id),
+                FOREIGN KEY (account_id) REFERENCES email_accounts(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_email_accounts_email ON email_accounts(email_address);
+            CREATE INDEX IF NOT EXISTS idx_email_contacts_email ON email_contacts(email_address);
+            CREATE INDEX IF NOT EXISTS idx_email_contacts_person ON email_contacts(person_id);
+            CREATE INDEX IF NOT EXISTS idx_email_contacts_autonomy ON email_contacts(autonomy_level);
+            CREATE INDEX IF NOT EXISTS idx_processed_emails_thread ON processed_emails(gmail_thread_id);
+            CREATE INDEX IF NOT EXISTS idx_processed_emails_from ON processed_emails(from_address);
+            CREATE INDEX IF NOT EXISTS idx_processed_emails_date ON processed_emails(date_sent);
+            CREATE INDEX IF NOT EXISTS idx_processed_emails_status ON processed_emails(extraction_status);
+            CREATE INDEX IF NOT EXISTS idx_email_threads_thread ON email_threads_summary(gmail_thread_id);
+
+            -- WhatsApp contacts: autonomous conversation whitelist + per-contact settings
+            CREATE TABLE IF NOT EXISTS whatsapp_contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                phone TEXT,
+                whatsapp_jid TEXT,
+                autonomy_level TEXT DEFAULT 'review_first',
+                relationship_type TEXT DEFAULT 'unknown',
+                communication_style TEXT DEFAULT 'casual and friendly',
+                key_facts TEXT DEFAULT '[]',
+                open_threads TEXT DEFAULT '[]',
+                conversation_count INTEGER DEFAULT 0,
+                last_message_at TIMESTAMP,
+                last_synced_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT DEFAULT '{}'
+            );
+
+            -- WhatsApp message history for autonomous conversations
+            CREATE TABLE IF NOT EXISTS whatsapp_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contact_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                flagged_for_review INTEGER DEFAULT 0,
+                review_status TEXT DEFAULT 'none',
+                source TEXT DEFAULT 'bridge',
+                whatsapp_message_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (contact_id) REFERENCES whatsapp_contacts(id)
+            );
+
+            -- WhatsApp scheduled messages for future delivery
+            CREATE TABLE IF NOT EXISTS whatsapp_scheduled (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contact_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                send_at TIMESTAMP NOT NULL,
+                status TEXT DEFAULT 'pending',
+                reason TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sent_at TIMESTAMP,
+                error TEXT,
+                FOREIGN KEY (contact_id) REFERENCES whatsapp_contacts(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_whatsapp_contacts_name ON whatsapp_contacts(name);
+            CREATE INDEX IF NOT EXISTS idx_whatsapp_contacts_phone ON whatsapp_contacts(phone);
+            CREATE INDEX IF NOT EXISTS idx_whatsapp_contacts_autonomy ON whatsapp_contacts(autonomy_level);
+            CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_contact ON whatsapp_messages(contact_id);
+            CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_created ON whatsapp_messages(created_at);
+            CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_wa_id ON whatsapp_messages(whatsapp_message_id);
+            CREATE INDEX IF NOT EXISTS idx_whatsapp_scheduled_send_at ON whatsapp_scheduled(send_at);
+            CREATE INDEX IF NOT EXISTS idx_whatsapp_scheduled_status ON whatsapp_scheduled(status);
         """)
         self.conn.commit()
 
@@ -1077,6 +1227,480 @@ class SQLiteStore:
                     # If decryption fails, the value may be plaintext (pre-encryption data)
                     logger.debug(f"Decryption skipped for {table}.{field}: {e}")
         return result
+
+    # ── Email Accounts ─────────────────────────────────────────────────
+
+    def add_email_account(
+        self,
+        email_address: str,
+        display_name: str = "",
+        account_type: str = "personal",
+        credentials_file: str = "",
+        token_file: str = "",
+        import_days: int = 90,
+    ) -> int:
+        """Add a new email account for monitoring."""
+        cursor = self.conn.execute(
+            """INSERT OR IGNORE INTO email_accounts
+               (email_address, display_name, account_type, credentials_file, token_file, import_days)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (email_address, display_name, account_type, credentials_file, token_file, import_days),
+        )
+        self.conn.commit()
+        if cursor.lastrowid:
+            return cursor.lastrowid
+        row = self.conn.execute(
+            "SELECT id FROM email_accounts WHERE email_address = ?", (email_address,)
+        ).fetchone()
+        return row["id"]
+
+    def get_email_accounts(self, enabled_only: bool = True) -> list[dict]:
+        """Get all email accounts."""
+        if enabled_only:
+            rows = self.conn.execute(
+                "SELECT * FROM email_accounts WHERE sync_enabled = 1 ORDER BY created_at"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM email_accounts ORDER BY created_at"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_email_account(self, account_id: int) -> Optional[dict]:
+        """Get a single email account by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM email_accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_email_account_sync(self, account_id: int, last_sync_at: str = None):
+        """Update the last sync timestamp for an email account."""
+        self.conn.execute(
+            "UPDATE email_accounts SET last_sync_at = ? WHERE id = ?",
+            (last_sync_at or datetime.now().isoformat(), account_id),
+        )
+        self.conn.commit()
+
+    def update_email_account_import(self, account_id: int):
+        """Mark full import as completed for an account."""
+        self.conn.execute(
+            "UPDATE email_accounts SET last_full_import_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), account_id),
+        )
+        self.conn.commit()
+
+    # ── Email Contacts ──────────────────────────────────────────────
+
+    def upsert_email_contact(
+        self,
+        email_address: str,
+        display_name: str = None,
+        person_id: int = None,
+        autonomy_level: str = None,
+        relationship_type: str = None,
+        key_facts: list = None,
+        topics: list = None,
+        metadata: dict = None,
+    ) -> int:
+        """Create or update an email contact with field merging."""
+        domain = email_address.split("@")[1] if "@" in email_address else ""
+        existing = self.conn.execute(
+            "SELECT * FROM email_contacts WHERE email_address = ? COLLATE NOCASE",
+            (email_address,),
+        ).fetchone()
+
+        if existing:
+            updates = []
+            params = []
+            if display_name is not None:
+                updates.append("display_name = ?")
+                params.append(display_name)
+            if person_id is not None:
+                updates.append("person_id = ?")
+                params.append(person_id)
+            if autonomy_level is not None:
+                updates.append("autonomy_level = ?")
+                params.append(autonomy_level)
+            if relationship_type is not None:
+                updates.append("relationship_type = ?")
+                params.append(relationship_type)
+            if key_facts is not None:
+                old_facts = json.loads(existing["key_facts"])
+                merged = list(set(old_facts + key_facts))
+                updates.append("key_facts = ?")
+                params.append(json.dumps(merged))
+            if topics is not None:
+                old_topics = json.loads(existing["topics"])
+                merged = list(set(old_topics + topics))
+                updates.append("topics = ?")
+                params.append(json.dumps(merged))
+            if metadata is not None:
+                updates.append("metadata = ?")
+                params.append(json.dumps(metadata))
+
+            updates.append("updated_at = ?")
+            params.append(datetime.now().isoformat())
+            params.append(existing["id"])
+            self.conn.execute(
+                f"UPDATE email_contacts SET {', '.join(updates)} WHERE id = ?", params
+            )
+            self.conn.commit()
+            return existing["id"]
+        else:
+            cursor = self.conn.execute(
+                """INSERT INTO email_contacts
+                   (email_address, display_name, person_id, autonomy_level,
+                    relationship_type, domain, first_seen_at, key_facts, topics, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    email_address,
+                    display_name or "",
+                    person_id,
+                    autonomy_level or "review_first",
+                    relationship_type or "unknown",
+                    domain,
+                    datetime.now().isoformat(),
+                    json.dumps(key_facts or []),
+                    json.dumps(topics or []),
+                    json.dumps(metadata or {}),
+                ),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
+
+    def get_email_contact(self, email_address: str) -> Optional[dict]:
+        """Look up an email contact by address."""
+        row = self.conn.execute(
+            "SELECT * FROM email_contacts WHERE email_address = ? COLLATE NOCASE",
+            (email_address,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_email_contacts(self, autonomy_level: str = None, limit: int = 100) -> list[dict]:
+        """Get email contacts, optionally filtered by autonomy level."""
+        if autonomy_level:
+            rows = self.conn.execute(
+                "SELECT * FROM email_contacts WHERE autonomy_level = ? ORDER BY last_email_at DESC LIMIT ?",
+                (autonomy_level, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM email_contacts ORDER BY last_email_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_email_contact_stats(
+        self, email_address: str, direction: str, sentiment: str = None, topics: list = None
+    ):
+        """Increment email counts and update sentiment/topics for a contact."""
+        contact = self.get_email_contact(email_address)
+        if not contact:
+            self.upsert_email_contact(email_address)
+            contact = self.get_email_contact(email_address)
+
+        updates = ["last_email_at = ?", "updated_at = ?"]
+        params = [datetime.now().isoformat(), datetime.now().isoformat()]
+
+        if direction == "received":
+            updates.append("email_count_received = email_count_received + 1")
+        elif direction == "sent":
+            updates.append("email_count_sent = email_count_sent + 1")
+
+        if sentiment:
+            updates.append("sentiment_trend = ?")
+            params.append(sentiment)
+
+        if topics:
+            old_topics = json.loads(contact["topics"])
+            merged = list(set(old_topics + topics))[:50]  # cap at 50 topics
+            updates.append("topics = ?")
+            params.append(json.dumps(merged))
+
+        params.append(contact["id"])
+        self.conn.execute(
+            f"UPDATE email_contacts SET {', '.join(updates)} WHERE id = ?", params
+        )
+        self.conn.commit()
+
+    def set_email_contact_autonomy(self, email_address: str, level: str):
+        """Set the autonomy level for an email contact."""
+        self.conn.execute(
+            "UPDATE email_contacts SET autonomy_level = ?, updated_at = ? WHERE email_address = ? COLLATE NOCASE",
+            (level, datetime.now().isoformat(), email_address),
+        )
+        self.conn.commit()
+
+    def link_email_contact_to_person(self, email_address: str, person_id: int):
+        """Link an email contact to a person in the CRM."""
+        self.conn.execute(
+            "UPDATE email_contacts SET person_id = ?, updated_at = ? WHERE email_address = ? COLLATE NOCASE",
+            (person_id, datetime.now().isoformat(), email_address),
+        )
+        self.conn.commit()
+
+    # ── Processed Emails ────────────────────────────────────────────
+
+    def store_processed_email(
+        self,
+        account_id: int,
+        gmail_message_id: str,
+        gmail_thread_id: str,
+        from_address: str = None,
+        to_addresses: list = None,
+        cc_addresses: list = None,
+        subject: str = None,
+        date_sent: str = None,
+        body_preview: str = None,
+        has_attachments: bool = False,
+        attachment_metadata: list = None,
+    ) -> Optional[int]:
+        """Store a processed email record. Returns None if already exists."""
+        try:
+            cursor = self.conn.execute(
+                """INSERT INTO processed_emails
+                   (account_id, gmail_message_id, gmail_thread_id, from_address,
+                    to_addresses, cc_addresses, subject, date_sent, body_preview,
+                    has_attachments, attachment_metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    account_id,
+                    gmail_message_id,
+                    gmail_thread_id,
+                    from_address,
+                    json.dumps(to_addresses or []),
+                    json.dumps(cc_addresses or []),
+                    subject,
+                    date_sent,
+                    (body_preview or "")[:500],
+                    1 if has_attachments else 0,
+                    json.dumps(attachment_metadata or []),
+                ),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return None  # already processed
+
+    def is_email_processed(self, account_id: int, gmail_message_id: str) -> bool:
+        """Check if an email has already been processed."""
+        row = self.conn.execute(
+            "SELECT 1 FROM processed_emails WHERE account_id = ? AND gmail_message_id = ?",
+            (account_id, gmail_message_id),
+        ).fetchone()
+        return row is not None
+
+    def get_pending_extractions(self, batch_size: int = 20) -> list[dict]:
+        """Get emails pending AI extraction."""
+        rows = self.conn.execute(
+            """SELECT pe.*, ea.email_address as account_email
+               FROM processed_emails pe
+               JOIN email_accounts ea ON pe.account_id = ea.id
+               WHERE pe.extraction_status = 'pending'
+               ORDER BY pe.date_sent ASC LIMIT ?""",
+            (batch_size,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_email_extraction(
+        self,
+        email_id: int,
+        extraction_data: dict,
+        urgency: int = 3,
+        importance: int = 3,
+        category: str = "general",
+        memory_id: int = None,
+    ):
+        """Update email with extraction results."""
+        self.conn.execute(
+            """UPDATE processed_emails SET extraction_status = 'extracted',
+               extraction_data = ?, urgency = ?, importance = ?, category = ?,
+               memory_id = ? WHERE id = ?""",
+            (json.dumps(extraction_data), urgency, importance, category, memory_id, email_id),
+        )
+        self.conn.commit()
+
+    def mark_email_extraction_failed(self, email_id: int):
+        """Mark an email extraction as failed."""
+        self.conn.execute(
+            "UPDATE processed_emails SET extraction_status = 'failed' WHERE id = ?",
+            (email_id,),
+        )
+        self.conn.commit()
+
+    def get_processed_emails(
+        self,
+        account_id: int = None,
+        from_address: str = None,
+        thread_id: str = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Query processed emails with optional filters."""
+        conditions = []
+        params = []
+        if account_id:
+            conditions.append("account_id = ?")
+            params.append(account_id)
+        if from_address:
+            conditions.append("from_address LIKE ?")
+            params.append(f"%{from_address}%")
+        if thread_id:
+            conditions.append("gmail_thread_id = ?")
+            params.append(thread_id)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM processed_emails {where} ORDER BY date_sent DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_import_progress(self, account_id: int) -> dict:
+        """Get import/extraction progress for an account."""
+        total = self.conn.execute(
+            "SELECT COUNT(*) as c FROM processed_emails WHERE account_id = ?", (account_id,)
+        ).fetchone()["c"]
+        pending = self.conn.execute(
+            "SELECT COUNT(*) as c FROM processed_emails WHERE account_id = ? AND extraction_status = 'pending'",
+            (account_id,),
+        ).fetchone()["c"]
+        extracted = self.conn.execute(
+            "SELECT COUNT(*) as c FROM processed_emails WHERE account_id = ? AND extraction_status = 'extracted'",
+            (account_id,),
+        ).fetchone()["c"]
+        failed = self.conn.execute(
+            "SELECT COUNT(*) as c FROM processed_emails WHERE account_id = ? AND extraction_status = 'failed'",
+            (account_id,),
+        ).fetchone()["c"]
+        return {
+            "total": total,
+            "pending": pending,
+            "extracted": extracted,
+            "failed": failed,
+            "progress_pct": round((extracted / total * 100) if total > 0 else 0, 1),
+        }
+
+    # ── Email Thread Summaries ──────────────────────────────────────
+
+    def upsert_thread_summary(
+        self,
+        account_id: int,
+        gmail_thread_id: str,
+        subject: str = None,
+        participants: list = None,
+        message_count: int = 0,
+        summary: str = "",
+        topics: list = None,
+        commitments: list = None,
+        status: str = "active",
+        first_message_at: str = None,
+        last_message_at: str = None,
+    ) -> int:
+        """Create or update a thread summary."""
+        existing = self.conn.execute(
+            "SELECT id FROM email_threads_summary WHERE account_id = ? AND gmail_thread_id = ?",
+            (account_id, gmail_thread_id),
+        ).fetchone()
+
+        if existing:
+            self.conn.execute(
+                """UPDATE email_threads_summary SET
+                   subject = COALESCE(?, subject),
+                   participants = COALESCE(?, participants),
+                   message_count = ?, summary = ?, topics = ?,
+                   commitments = ?, status = ?,
+                   last_message_at = COALESCE(?, last_message_at),
+                   last_summarized_at = ?
+                   WHERE id = ?""",
+                (
+                    subject,
+                    json.dumps(participants) if participants else None,
+                    message_count,
+                    summary,
+                    json.dumps(topics or []),
+                    json.dumps(commitments or []),
+                    status,
+                    last_message_at,
+                    datetime.now().isoformat(),
+                    existing["id"],
+                ),
+            )
+            self.conn.commit()
+            return existing["id"]
+        else:
+            cursor = self.conn.execute(
+                """INSERT INTO email_threads_summary
+                   (account_id, gmail_thread_id, subject, participants, message_count,
+                    summary, topics, commitments, status, first_message_at, last_message_at,
+                    last_summarized_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    account_id,
+                    gmail_thread_id,
+                    subject or "",
+                    json.dumps(participants or []),
+                    message_count,
+                    summary,
+                    json.dumps(topics or []),
+                    json.dumps(commitments or []),
+                    status,
+                    first_message_at,
+                    last_message_at,
+                    datetime.now().isoformat(),
+                ),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
+
+    def get_thread_summary(self, account_id: int, thread_id: str) -> Optional[dict]:
+        """Get summary for a specific thread."""
+        row = self.conn.execute(
+            "SELECT * FROM email_threads_summary WHERE account_id = ? AND gmail_thread_id = ?",
+            (account_id, thread_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_active_threads(self, account_id: int = None, limit: int = 20) -> list[dict]:
+        """Get active thread summaries."""
+        if account_id:
+            rows = self.conn.execute(
+                """SELECT * FROM email_threads_summary WHERE account_id = ? AND status = 'active'
+                   ORDER BY last_message_at DESC LIMIT ?""",
+                (account_id, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT * FROM email_threads_summary WHERE status = 'active'
+                   ORDER BY last_message_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_email_stats(self) -> dict:
+        """Get email system statistics for dashboard."""
+        accounts = self.conn.execute("SELECT COUNT(*) as c FROM email_accounts WHERE sync_enabled = 1").fetchone()["c"]
+        contacts = self.conn.execute("SELECT COUNT(*) as c FROM email_contacts").fetchone()["c"]
+        total_emails = self.conn.execute("SELECT COUNT(*) as c FROM processed_emails").fetchone()["c"]
+        extracted = self.conn.execute(
+            "SELECT COUNT(*) as c FROM processed_emails WHERE extraction_status = 'extracted'"
+        ).fetchone()["c"]
+        pending = self.conn.execute(
+            "SELECT COUNT(*) as c FROM processed_emails WHERE extraction_status = 'pending'"
+        ).fetchone()["c"]
+        active_threads = self.conn.execute(
+            "SELECT COUNT(*) as c FROM email_threads_summary WHERE status = 'active'"
+        ).fetchone()["c"]
+        auto_contacts = self.conn.execute(
+            "SELECT COUNT(*) as c FROM email_contacts WHERE autonomy_level = 'full_auto'"
+        ).fetchone()["c"]
+        return {
+            "accounts": accounts,
+            "contacts": contacts,
+            "total_emails": total_emails,
+            "extracted": extracted,
+            "pending": pending,
+            "active_threads": active_threads,
+            "auto_reply_contacts": auto_contacts,
+        }
 
     # ── Stats ────────────────────────────────────────────────────────
 

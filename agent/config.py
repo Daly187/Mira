@@ -105,6 +105,18 @@ class Config:
     TG_SESSION_PATH = DATA_DIR / "telegram_userbot"
     TG_SYNC_INTERVAL = int(os.getenv("TG_SYNC_INTERVAL", "300"))  # seconds
 
+    # ── WhatsApp Bridge (Node.js sidecar) ───────────────────
+    WA_SERVER_URL = os.getenv("WA_SERVER_URL", "http://localhost:3001")
+    WA_SESSION_PATH = DATA_DIR / "whatsapp-session"
+    WA_SYNC_INTERVAL = int(os.getenv("WA_SYNC_INTERVAL", "120"))  # seconds
+
+    # ── Email Extractor (Multi-Account) ─────────────────────
+    EMAIL_ACCOUNT_LABELS = os.getenv("EMAIL_ACCOUNT_LABELS", "")  # comma-separated: "personal,boldr"
+    EMAIL_CHECK_INTERVAL = int(os.getenv("EMAIL_CHECK_INTERVAL", "300"))  # seconds
+    EMAIL_BULK_IMPORT_DAYS = int(os.getenv("EMAIL_BULK_IMPORT_DAYS", "90"))
+    EMAIL_EXTRACTION_BATCH_SIZE = int(os.getenv("EMAIL_EXTRACTION_BATCH_SIZE", "20"))
+    EMAIL_CREDS_DIR = DATA_DIR / "email_creds"
+
     @classmethod
     def reload(cls):
         """Re-read all config values from os.environ (call after .env update)."""
@@ -139,12 +151,19 @@ class Config:
         cls.TG_API_HASH = os.getenv("TG_API_HASH", "")
         cls.TG_PHONE = os.getenv("TG_PHONE", "")
         cls.TG_SYNC_INTERVAL = int(os.getenv("TG_SYNC_INTERVAL", "300"))
+        cls.WA_SERVER_URL = os.getenv("WA_SERVER_URL", "http://localhost:3001")
+        cls.WA_SYNC_INTERVAL = int(os.getenv("WA_SYNC_INTERVAL", "120"))
+        cls.EMAIL_ACCOUNT_LABELS = os.getenv("EMAIL_ACCOUNT_LABELS", "")
+        cls.EMAIL_CHECK_INTERVAL = int(os.getenv("EMAIL_CHECK_INTERVAL", "300"))
+        cls.EMAIL_BULK_IMPORT_DAYS = int(os.getenv("EMAIL_BULK_IMPORT_DAYS", "90"))
+        cls.EMAIL_EXTRACTION_BATCH_SIZE = int(os.getenv("EMAIL_EXTRACTION_BATCH_SIZE", "20"))
 
     @classmethod
     def ensure_dirs(cls):
         """Create required directories if they don't exist."""
         cls.DATA_DIR.mkdir(parents=True, exist_ok=True)
         cls.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        cls.EMAIL_CREDS_DIR.mkdir(parents=True, exist_ok=True)
 
     @classmethod
     def validate(cls) -> list[str]:

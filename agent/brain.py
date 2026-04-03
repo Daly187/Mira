@@ -48,6 +48,7 @@ LOCAL_ELIGIBLE_TASKS = frozenset({
     "simple_qa",
     "data_formatting",
     "text_summarization_short",
+    "email_extraction",
 })
 
 
@@ -464,6 +465,127 @@ Write ONLY the reply text, nothing else."""
             tier="standard",
             task_type="draft_reply",
         )
+
+    async def extract_email_data(self, email_data: dict) -> dict:
+        """Deep structured extraction from a single email. Uses HAIKU for cost efficiency.
+
+        Returns dict with: topics, commitments, important_dates, sentiment,
+        key_facts, action_items, entities, response_needed, response_urgency, category.
+        """
+        prompt = f"""Extract structured information from this email. Return ONLY valid JSON.
+
+From: {email_data.get('from_address', '')}
+To: {email_data.get('to_addresses', '')}
+Subject: {email_data.get('subject', '')}
+Date: {email_data.get('date_sent', '')}
+Body:
+{(email_data.get('body_preview', '') or '')[:2000]}
+
+Return JSON with these exact keys:
+{{
+  "topics": ["key topics discussed"],
+  "commitments": [{{"who": "name", "what": "commitment", "deadline": "date or null"}}],
+  "important_dates": [{{"date": "YYYY-MM-DD", "description": "what happens"}}],
+  "sentiment": "positive|neutral|negative",
+  "key_facts": ["notable facts about sender or discussed people/projects"],
+  "action_items": [{{"description": "task", "assignee": "who", "due": "date or null"}}],
+  "entities": {{"people": [], "companies": [], "amounts": [], "locations": []}},
+  "response_needed": true or false,
+  "response_urgency": 1-5,
+  "category": "work|personal|trading|newsletter|marketing|transactional|spam"
+}}"""
+
+        response = await self.think(
+            message=prompt,
+            include_history=False,
+            system_override="You are a precise email data extraction system. Return ONLY valid JSON, no markdown.",
+            max_tokens=1024,
+            tier="fast",
+            task_type="email_extraction",
+        )
+
+        try:
+            # Strip markdown code fences if present
+            text = response.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+            if text.startswith("json"):
+                text = text[4:].strip()
+            return json.loads(text)
+        except (json.JSONDecodeError, IndexError):
+            logger.warning(f"Failed to parse email extraction JSON: {response[:200]}")
+            return {
+                "topics": [],
+                "commitments": [],
+                "important_dates": [],
+                "sentiment": "neutral",
+                "key_facts": [],
+                "action_items": [],
+                "entities": {"people": [], "companies": [], "amounts": [], "locations": []},
+                "response_needed": False,
+                "response_urgency": 1,
+                "category": "general",
+            }
+
+    async def summarize_email_thread(self, messages: list[dict]) -> dict:
+        """Summarize an email thread. Uses Haiku for short threads, Sonnet for long.
+
+        Returns dict with: summary, topics, commitments, status, open_questions.
+        """
+        tier = "fast" if len(messages) <= 5 else "standard"
+
+        thread_text = ""
+        for msg in messages[:20]:  # cap at 20 messages
+            thread_text += (
+                f"From: {msg.get('from', 'Unknown')}\n"
+                f"Date: {msg.get('date', '')}\n"
+                f"Body: {(msg.get('body', '') or '')[:500]}\n---\n"
+            )
+
+        prompt = f"""Summarize this email thread. Return ONLY valid JSON.
+
+{thread_text[:4000]}
+
+Return JSON with these exact keys:
+{{
+  "summary": "2-3 sentence summary of the full thread",
+  "topics": ["main topics"],
+  "commitments": [{{"who": "name", "what": "commitment", "deadline": "date or null"}}],
+  "status": "active|resolved|stale",
+  "open_questions": ["unresolved questions or pending items"]
+}}"""
+
+        response = await self.think(
+            message=prompt,
+            include_history=False,
+            system_override="You are a precise email thread summarizer. Return ONLY valid JSON, no markdown.",
+            max_tokens=1024,
+            tier=tier,
+            task_type="email_extraction",
+        )
+
+        try:
+            text = response.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+            if text.startswith("json"):
+                text = text[4:].strip()
+            return json.loads(text)
+        except (json.JSONDecodeError, IndexError):
+            logger.warning(f"Failed to parse thread summary JSON: {response[:200]}")
+            return {
+                "summary": "",
+                "topics": [],
+                "commitments": [],
+                "status": "active",
+                "open_questions": [],
+            }
 
     async def generate_briefing(self, data: dict) -> str:
         """Generate the daily morning briefing. Uses SONNET."""

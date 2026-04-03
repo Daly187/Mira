@@ -1,15 +1,17 @@
 import { useState, useEffect } from 'react'
 import { getSetupStatus, saveSetupKeys, testSetupService } from '../api/client'
-import { Key, Mic, Cloud, Shield, Check, X, Eye, EyeOff, Loader2, ExternalLink, AlertTriangle } from 'lucide-react'
+import { Key, Mic, Cloud, Shield, Check, X, Eye, EyeOff, Loader2, ExternalLink, AlertTriangle, MessageCircle, Cpu } from 'lucide-react'
 
 const GROUP_META = {
-  core: { label: 'Core (Required)', icon: Key, description: 'Essential keys to run Mira' },
+  core: { label: 'Core (Required)', icon: Key, description: 'Essential keys to run Mira — API, Telegram bot, dashboard auth' },
+  telegram: { label: 'Telegram Userbot', icon: MessageCircle, description: 'Autonomous messaging from your personal Telegram account' },
+  local_model: { label: 'Local AI (Ollama)', icon: Cpu, description: 'Free on-device model for simple tasks — saves API costs' },
   voice: { label: 'Voice', icon: Mic, description: 'ElevenLabs for text-to-speech' },
   google: { label: 'Google APIs', icon: Cloud, description: 'Gmail and Calendar integration' },
   security: { label: 'Security', icon: Shield, description: 'Encryption and data protection' },
 }
 
-const GROUP_ORDER = ['core', 'voice', 'google', 'security']
+const GROUP_ORDER = ['core', 'telegram', 'local_model', 'voice', 'google', 'security']
 
 export default function SetupPage() {
   const [status, setStatus] = useState(null)
@@ -293,6 +295,8 @@ export default function SetupPage() {
           {[
             { label: 'Anthropic Console', url: 'https://console.anthropic.com' },
             { label: 'Telegram BotFather', url: 'https://t.me/BotFather' },
+            { label: 'Telegram API Keys', url: 'https://my.telegram.org' },
+            { label: 'Ollama Download', url: 'https://ollama.com/download' },
             { label: 'ElevenLabs', url: 'https://elevenlabs.io' },
             { label: 'Google Cloud Console', url: 'https://console.cloud.google.com' },
           ].map(link => (

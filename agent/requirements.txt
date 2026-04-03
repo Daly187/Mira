@@ -38,5 +38,8 @@ httpx>=0.27.0
 # Telegram Userbot (conversation management)
 telethon>=1.36.0
 
+# WhatsApp Bridge (HTTP client for Node.js sidecar)
+aiohttp>=3.9.0
+
 # Dev tooling
 watchdog>=4.0.0

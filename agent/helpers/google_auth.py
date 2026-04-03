@@ -162,6 +162,23 @@ class GoogleAuthManager:
             return None
 
 
+    @staticmethod
+    def get_service_for_account(credentials_path: Path, token_path: Path):
+        """Build a Gmail service for a specific account's credential/token pair.
+
+        Each account has its own credentials.json and token.json under
+        Config.EMAIL_CREDS_DIR. The OAuth flow runs per-account on first setup.
+
+        Returns:
+            googleapiclient.discovery.Resource for Gmail, or None.
+        """
+        manager = GoogleAuthManager(
+            credentials_path=credentials_path,
+            token_path=token_path,
+        )
+        return manager.get_gmail_service()
+
+
 # ── CLI entry point for first-time auth ─────────────────────────────
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
