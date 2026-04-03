@@ -23,7 +23,12 @@ async function fetchAPI(endpoint, options = {}) {
     headers['Authorization'] = `Bearer ${token}`
   }
 
-  const response = await fetch(`${apiBase}${endpoint}`, { ...options, headers })
+  let response
+  try {
+    response = await fetch(`${apiBase}${endpoint}`, { ...options, headers })
+  } catch (e) {
+    throw new Error('Backend unreachable. Check your connection or configure the backend URL in Settings.')
+  }
 
   // If 401, redirect to login (unless already on login/setup)
   if (response.status === 401) {
@@ -38,6 +43,13 @@ async function fetchAPI(endpoint, options = {}) {
   if (!response.ok) {
     throw new Error(`API error: ${response.status} ${response.statusText}`)
   }
+
+  // Guard against HTML responses (e.g. Firebase hosting returning index.html for /api/* routes)
+  const contentType = response.headers.get('content-type') || ''
+  if (!contentType.includes('application/json')) {
+    throw new Error('Backend not connected. The API returned HTML instead of JSON. Configure your backend URL in Settings.')
+  }
+
   return response.json()
 }
 
@@ -54,12 +66,21 @@ export const getRecentMemories = (limit = 20) => fetchAPI(`/memories/recent?limi
 export const createMemory = (data) => fetchAPI('/memories', {
   method: 'POST', body: JSON.stringify(data),
 })
+export const updateMemory = (id, data) => fetchAPI(`/memories/${id}`, {
+  method: 'PUT', body: JSON.stringify(data),
+})
+export const deleteMemory = (id) => fetchAPI(`/memories/${id}`, {
+  method: 'DELETE',
+})
 
 // ── People ────────────────────────────────────────────────────
 export const getPeople = () => fetchAPI('/people')
 export const getPerson = (name) => fetchAPI(`/people/${encodeURIComponent(name)}`)
 export const upsertPerson = (data) => fetchAPI('/people', {
   method: 'POST', body: JSON.stringify(data),
+})
+export const deletePerson = (id) => fetchAPI(`/people/${id}`, {
+  method: 'DELETE',
 })
 
 // ── Tasks ─────────────────────────────────────────────────────
@@ -72,6 +93,9 @@ export const completeTask = (id) => fetchAPI(`/tasks/${id}/complete`, { method: 
 // ── Trades ────────────────────────────────────────────────────
 export const getTrades = (limit = 50) => fetchAPI(`/trades?limit=${limit}`)
 export const getOpenTrades = () => fetchAPI('/trades/open')
+export const createTrade = (data) => fetchAPI('/trades', {
+  method: 'POST', body: JSON.stringify(data),
+})
 
 // ── Actions ───────────────────────────────────────────────────
 export const getActions = (date) => fetchAPI(`/actions${date ? `?date=${date}` : ''}`)
@@ -100,6 +124,9 @@ export const getCalendarEvents = (start, end) => {
   return fetchAPI(`/calendar/events?${params}`)
 }
 export const getMiraSchedule = () => fetchAPI('/calendar/schedule')
+export const createCalendarEvent = (data) => fetchAPI('/calendar/events', {
+  method: 'POST', body: JSON.stringify(data),
+})
 
 // ── Kill Switch ──────────────────────────────────────────────
 export const getKillSwitchStatus = () => fetchAPI('/killswitch/status')
@@ -108,6 +135,10 @@ export const deactivateKillSwitch = () => fetchAPI('/resume', { method: 'POST' }
 
 // ── Habits ───────────────────────────────────────────────────
 export const getHabits = () => fetchAPI('/habits')
+export const createHabit = (data) => fetchAPI('/habits', {
+  method: 'POST', body: JSON.stringify(data),
+})
+export const deleteHabit = (id) => fetchAPI(`/habits/${id}`, { method: 'DELETE' })
 export const logHabit = (name) => fetchAPI(`/habits/${encodeURIComponent(name)}/log`, {
   method: 'POST',
 })
@@ -120,6 +151,9 @@ export const getScheduleHistory = () => fetchAPI('/schedule')
 
 // ── Decisions ────────────────────────────────────────────────
 export const getDecisions = (limit = 50) => fetchAPI(`/decisions?limit=${limit}`)
+export const createDecision = (data) => fetchAPI('/decisions', {
+  method: 'POST', body: JSON.stringify(data),
+})
 export const scoreDecision = (id, score, outcome) => fetchAPI(`/decisions/${id}/score`, {
   method: 'POST', body: JSON.stringify({ score, outcome }),
 })
@@ -144,6 +178,46 @@ export const saveSetupKeys = (keys) => fetchAPI('/setup/keys', {
 export const testSetupService = (service) => fetchAPI(`/setup/test/${service}`, {
   method: 'POST',
 })
+
+// ── Telegram Contacts ───────────────────────────────────────
+export const getTelegramContacts = () => fetchAPI('/telegram/contacts')
+export const getTelegramContact = (name) => fetchAPI(`/telegram/contacts/${encodeURIComponent(name)}`)
+export const upsertTelegramContact = (data) => fetchAPI('/telegram/contacts', {
+  method: 'POST', body: JSON.stringify(data),
+})
+export const deleteTelegramContact = (id) => fetchAPI(`/telegram/contacts/${id}`, {
+  method: 'DELETE',
+})
+export const getContactMessages = (contactId, limit = 50) =>
+  fetchAPI(`/telegram/contacts/${contactId}/messages?limit=${limit}`)
+export const getPendingReviews = () => fetchAPI('/telegram/reviews')
+
+// ── Soul Settings ───────────────────────────────────────────
+export const getSoulSettings = () => fetchAPI('/soul/settings')
+export const getSoulSetting = (type) => fetchAPI(`/soul/settings/${encodeURIComponent(type)}`)
+export const upsertSoulSetting = (data) => fetchAPI('/soul/settings', {
+  method: 'POST', body: JSON.stringify(data),
+})
+export const deleteSoulSetting = (type) => fetchAPI(`/soul/settings/${encodeURIComponent(type)}`, {
+  method: 'DELETE',
+})
+
+// ── Telegram Messaging ──────────────────────────────────────
+export const sendTelegramMessage = (contactId, text, scheduleAt = null) =>
+  fetchAPI(`/telegram/contacts/${contactId}/send`, {
+    method: 'POST', body: JSON.stringify({ text, schedule_at: scheduleAt }),
+  })
+export const markContactRead = (contactId) =>
+  fetchAPI(`/telegram/contacts/${contactId}/read`, { method: 'POST' })
+export const getUnreadCounts = () => fetchAPI('/telegram/unread')
+export const getScheduledMessages = (contactId = null) =>
+  fetchAPI(`/telegram/scheduled${contactId ? `?contact_id=${contactId}` : ''}`)
+export const createScheduledMessage = (data) =>
+  fetchAPI('/telegram/scheduled', { method: 'POST', body: JSON.stringify(data) })
+export const cancelScheduledMessage = (id) =>
+  fetchAPI(`/telegram/scheduled/${id}`, { method: 'DELETE' })
+export const triggerTelegramSync = () =>
+  fetchAPI('/telegram/sync', { method: 'POST' })
 
 // ── Auth ─────────────────────────────────────────────────────
 export const setBackendUrl = (url) => {

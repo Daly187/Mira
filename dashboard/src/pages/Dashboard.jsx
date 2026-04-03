@@ -31,6 +31,7 @@ export default function Dashboard() {
   const [killSwitchLoading, setKillSwitchLoading] = useState(false)
   const [setupNeeded, setSetupNeeded] = useState(false)
   const [setupDismissed, setSetupDismissed] = useState(false)
+  const [backendError, setBackendError] = useState(null)
 
   useEffect(() => {
     getSetupStatus().then(s => setSetupNeeded(!s.setup_complete)).catch(() => {})
@@ -57,6 +58,7 @@ export default function Dashboard() {
         setOpenTrades(ot)
       } catch (e) {
         console.error('Failed to load dashboard:', e)
+        setBackendError(e.message)
       }
       setLoading(false)
     }
@@ -99,9 +101,13 @@ export default function Dashboard() {
   if (!kpis) {
     return (
       <div className="text-center py-20">
-        <h2 className="text-xl text-gray-400 mb-2">Cannot connect to Mira API</h2>
-        <p className="text-gray-600">Make sure the FastAPI server is running on port 8000</p>
-        <code className="text-sm text-mira-400 mt-4 block">uvicorn api:app --port 8000</code>
+        <h2 className="text-xl text-gray-400 mb-2">Cannot connect to Mira backend</h2>
+        <p className="text-gray-600 max-w-md mx-auto">
+          {backendError || 'Make sure the FastAPI server is running and configure the backend URL in Settings.'}
+        </p>
+        <Link to="/settings" className="inline-block mt-4 bg-purple-600 hover:bg-purple-700 text-white px-6 py-2 rounded-lg text-sm transition">
+          Configure Backend
+        </Link>
       </div>
     )
   }

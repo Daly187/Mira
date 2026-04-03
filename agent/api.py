@@ -285,6 +285,43 @@ def create_memory(memory: MemoryCreate):
     return {"id": memory_id, "status": "stored"}
 
 
+class MemoryUpdate(BaseModel):
+    content: Optional[str] = None
+    category: Optional[str] = None
+    importance: Optional[int] = None
+
+
+@app.put("/api/memories/{memory_id}")
+def update_memory(memory_id: int, update: MemoryUpdate):
+    """Update an existing memory."""
+    fields = []
+    values = []
+    if update.content is not None:
+        fields.append("content = ?")
+        values.append(update.content)
+    if update.category is not None:
+        fields.append("category = ?")
+        values.append(update.category)
+    if update.importance is not None:
+        fields.append("importance = ?")
+        values.append(update.importance)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    fields.append("updated_at = CURRENT_TIMESTAMP")
+    values.append(memory_id)
+    db.conn.execute(f"UPDATE memories SET {', '.join(fields)} WHERE id = ?", values)
+    db.conn.commit()
+    return {"id": memory_id, "status": "updated"}
+
+
+@app.delete("/api/memories/{memory_id}")
+def delete_memory(memory_id: int):
+    """Delete a memory by ID."""
+    db.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+    db.conn.commit()
+    return {"id": memory_id, "status": "deleted"}
+
+
 # ═══════════════════════════════════════════════════════════════
 # PEOPLE (CRM)
 # ═══════════════════════════════════════════════════════════════
@@ -321,6 +358,14 @@ def upsert_person(person: PersonUpdate):
         phone=person.phone,
     )
     return {"id": person_id, "status": "saved"}
+
+
+@app.delete("/api/people/{person_id}")
+def delete_person(person_id: int):
+    """Delete a person by ID."""
+    db.conn.execute("DELETE FROM people WHERE id = ?", (person_id,))
+    db.conn.commit()
+    return {"id": person_id, "status": "deleted"}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -372,6 +417,31 @@ def list_trades(limit: int = 50):
 @app.get("/api/trades/open")
 def open_trades():
     return db.get_open_trades()
+
+
+class TradeCreate(BaseModel):
+    instrument: str
+    direction: str
+    entry_price: Optional[float] = None
+    size: Optional[float] = None
+    strategy: Optional[str] = None
+    rationale: Optional[str] = None
+    platform: str = "mt5"
+
+
+@app.post("/api/trades")
+def create_trade(trade: TradeCreate):
+    """Log a new trade from the dashboard."""
+    trade_id = db.log_trade(
+        instrument=trade.instrument,
+        direction=trade.direction,
+        entry_price=trade.entry_price,
+        size=trade.size,
+        strategy=trade.strategy,
+        rationale=trade.rationale,
+        platform=trade.platform,
+    )
+    return {"id": trade_id, "status": "logged"}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -772,6 +842,34 @@ def get_calendar_events(
     return events
 
 
+@app.post("/api/calendar/events")
+def create_calendar_event(req: dict):
+    """Create a calendar event as a Mira task with a due date."""
+    title = req.get("title", "Untitled Event")
+    start = req.get("start")  # ISO datetime string
+    event_type = req.get("type", "user_event")
+    description = req.get("description", "")
+
+    if not start:
+        return {"error": "start is required"}, 400
+
+    task_id = db.add_task(
+        title=title,
+        description=description,
+        priority=req.get("priority", 3),
+        module=event_type,
+        due_date=start,
+    )
+    db.log_action("calendar", "event_created", f"Created event: {title}", {"task_id": task_id, "start": start})
+    return {
+        "id": task_id,
+        "title": title,
+        "start": start,
+        "type": event_type,
+        "description": description,
+    }
+
+
 # Mira's recurring schedule (static for display)
 MIRA_SCHEDULE = [
     {"time": "07:00", "task": "Morning Briefing", "frequency": "daily"},
@@ -1153,6 +1251,51 @@ async def get_habits():
         return []
 
 
+@app.post("/api/habits")
+async def create_habit(request: Request):
+    """Create a new habit."""
+    try:
+        body = await request.json()
+        name = body.get("name", "").strip().lower()
+        frequency = body.get("target_frequency", "daily")
+        category = body.get("category", "general")
+        if not name:
+            raise HTTPException(status_code=400, detail="Habit name is required")
+        # Check for duplicate
+        existing = db.conn.execute(
+            "SELECT id FROM habits WHERE name = ? COLLATE NOCASE", (name,)
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Habit '{name}' already exists")
+        cursor = db.conn.execute(
+            "INSERT INTO habits (name, target_frequency, category) VALUES (?, ?, ?)",
+            (name, frequency, category),
+        )
+        db.conn.commit()
+        return {"status": "created", "id": cursor.lastrowid, "name": name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/habits/{habit_id}")
+async def delete_habit(habit_id: int):
+    """Delete a habit and its log entries."""
+    try:
+        existing = db.conn.execute("SELECT id FROM habits WHERE id = ?", (habit_id,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Habit not found")
+        db.conn.execute("DELETE FROM habit_log WHERE habit_id = ?", (habit_id,))
+        db.conn.execute("DELETE FROM habits WHERE id = ?", (habit_id,))
+        db.conn.commit()
+        return {"status": "deleted", "id": habit_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/habits/{habit_name}/log")
 async def log_habit(habit_name: str):
     """Log a habit as done today."""
@@ -1345,6 +1488,34 @@ async def get_decisions(limit: int = Query(50)):
         return []
 
 
+@app.post("/api/decisions")
+async def create_decision(request: Request):
+    """Log a new decision."""
+    try:
+        body = await request.json()
+        decision_text = body.get("decision", "").strip()
+        if not decision_text:
+            raise HTTPException(status_code=400, detail="Decision text is required")
+        context = body.get("context", "")
+        reasoning = body.get("reasoning", "")
+        domain = body.get("domain", "general")
+        alternatives = body.get("alternatives_considered", "[]")
+        if isinstance(alternatives, list):
+            import json as _json
+            alternatives = _json.dumps(alternatives)
+        cursor = db.conn.execute(
+            """INSERT INTO decisions (decision, context, reasoning, domain, alternatives_considered)
+               VALUES (?, ?, ?, ?, ?)""",
+            (decision_text, context, reasoning, domain, alternatives),
+        )
+        db.conn.commit()
+        return {"status": "created", "id": cursor.lastrowid}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/decisions/{decision_id}/score")
 async def score_decision(decision_id: int, request: Request):
     """Score a past decision."""
@@ -1356,6 +1527,296 @@ async def score_decision(decision_id: int, request: Request):
         return {"status": "scored", "id": decision_id, "score": score}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════
+# TELEGRAM CONTACTS — Autonomous conversation whitelist
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/telegram/contacts")
+async def get_telegram_contacts():
+    """Get all Telegram contacts with autonomy settings."""
+    return db.get_all_telegram_contacts()
+
+
+@app.post("/api/telegram/contacts")
+async def upsert_telegram_contact(request: Request):
+    """Create or update a Telegram contact."""
+    body = await request.json()
+    name = body.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    cid = db.upsert_telegram_contact(
+        name=name,
+        telegram_user_id=body.get("telegram_user_id"),
+        telegram_username=body.get("telegram_username"),
+        autonomy_level=body.get("autonomy_level"),
+        relationship_type=body.get("relationship_type"),
+        communication_style=body.get("communication_style"),
+        key_facts=body.get("key_facts"),
+        metadata=body.get("metadata"),
+    )
+    return {"status": "ok", "id": cid, "name": name}
+
+
+@app.get("/api/telegram/contacts/{name}")
+async def get_telegram_contact(name: str):
+    """Look up a specific Telegram contact."""
+    contact = db.get_telegram_contact(name=name)
+    if not contact:
+        raise HTTPException(status_code=404, detail=f"Contact '{name}' not found")
+    return contact
+
+
+@app.delete("/api/telegram/contacts/{contact_id}")
+async def delete_telegram_contact(contact_id: int):
+    """Delete a Telegram contact."""
+    deleted = db.delete_telegram_contact(contact_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return {"status": "deleted", "id": contact_id}
+
+
+@app.get("/api/telegram/contacts/{contact_id}/messages")
+async def get_contact_messages(contact_id: int, limit: int = Query(default=50)):
+    """Get message history for a Telegram contact."""
+    return db.get_telegram_history(contact_id, limit=limit)
+
+
+@app.get("/api/telegram/reviews")
+async def get_pending_reviews():
+    """Get all messages pending owner review."""
+    return db.get_pending_reviews()
+
+
+@app.post("/api/telegram/contacts/{contact_id}/send")
+async def send_telegram_message(contact_id: int, request: Request):
+    """Send a message to a contact via the userbot, or schedule it for later."""
+    body = await request.json()
+    text = body.get("text", "").strip()
+    schedule_at = body.get("schedule_at")
+
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    contact = db.get_telegram_contact(name=None, telegram_user_id=None)
+    # Look up by ID directly
+    row = db.conn.execute("SELECT * FROM telegram_contacts WHERE id = ?", (contact_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    contact = dict(row)
+
+    if schedule_at:
+        sid = db.save_scheduled_message(contact_id, text, schedule_at, reason="manual")
+        return {"status": "scheduled", "scheduled_id": sid}
+
+    # Send immediately via userbot
+    if not hasattr(app.state, "mira") or not app.state.mira:
+        raise HTTPException(status_code=503, detail="Agent not running")
+
+    userbot = getattr(app.state.mira, "userbot", None)
+    if not userbot or not userbot.available:
+        raise HTTPException(status_code=503, detail="Userbot not connected. Configure TG_API_ID/TG_API_HASH in .env")
+
+    contact_name = contact.get("telegram_username") or contact.get("name")
+    result = await userbot.send_message(contact_name, text)
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to send message")
+
+    msg_id = db.save_telegram_message(
+        contact_id, "assistant", text, source="userbot",
+        telegram_message_id=result.get("message_id"),
+    )
+    db.log_action("telegram", "message_sent", f"to {contact['name']}", {"text": text[:200]})
+
+    return {"status": "sent", "message_id": msg_id}
+
+
+@app.post("/api/telegram/contacts/{contact_id}/read")
+async def mark_contact_read(contact_id: int):
+    """Mark all messages from a contact as read."""
+    row = db.conn.execute("SELECT * FROM telegram_contacts WHERE id = ?", (contact_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    contact = dict(row)
+
+    # Mark read via userbot if available
+    if hasattr(app.state, "mira") and app.state.mira:
+        userbot = getattr(app.state.mira, "userbot", None)
+        if userbot and userbot.available:
+            name = contact.get("telegram_username") or contact.get("name")
+            await userbot.mark_read(name)
+
+    return {"status": "ok"}
+
+
+@app.get("/api/telegram/unread")
+async def get_unread_counts():
+    """Get unread message counts from the userbot."""
+    if not hasattr(app.state, "mira") or not app.state.mira:
+        return []
+
+    userbot = getattr(app.state.mira, "userbot", None)
+    if not userbot or not userbot.available:
+        return []
+
+    dialogs = await userbot.get_unread_dialogs()
+
+    # Match unread dialogs to known contacts
+    contacts = db.get_all_telegram_contacts()
+    contact_map = {}
+    for c in contacts:
+        contact_map[c["name"].lower()] = c
+        if c.get("telegram_username"):
+            contact_map[c["telegram_username"].lower().lstrip("@")] = c
+
+    results = []
+    for d in dialogs:
+        matched = contact_map.get(d["name"].lower()) or contact_map.get(d["username"].lower())
+        if matched:
+            results.append({
+                "contact_id": matched["id"],
+                "name": matched["name"],
+                "unread_count": d["unread_count"],
+                "last_message": d["last_message"],
+            })
+
+    return results
+
+
+@app.get("/api/telegram/scheduled")
+async def get_scheduled_messages(contact_id: int = Query(default=None),
+                                  status: str = Query(default=None)):
+    """Get scheduled messages with optional filters."""
+    return db.get_scheduled_messages(contact_id=contact_id, status=status)
+
+
+@app.post("/api/telegram/scheduled")
+async def create_scheduled_message(request: Request):
+    """Create a scheduled message for future delivery."""
+    body = await request.json()
+    contact_id = body.get("contact_id")
+    content = body.get("content", "").strip()
+    send_at = body.get("send_at")
+    reason = body.get("reason", "manual")
+
+    if not contact_id or not content or not send_at:
+        raise HTTPException(status_code=400, detail="contact_id, content, and send_at are required")
+
+    sid = db.save_scheduled_message(contact_id, content, send_at, reason)
+    return {"status": "ok", "id": sid}
+
+
+@app.delete("/api/telegram/scheduled/{message_id}")
+async def cancel_scheduled(message_id: int):
+    """Cancel a pending scheduled message."""
+    cancelled = db.cancel_scheduled_message(message_id)
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="Message not found or already sent")
+    return {"status": "cancelled", "id": message_id}
+
+
+@app.post("/api/telegram/sync")
+async def trigger_sync():
+    """Trigger an immediate conversation sync from userbot."""
+    if not hasattr(app.state, "mira") or not app.state.mira:
+        raise HTTPException(status_code=503, detail="Agent not running")
+
+    userbot = getattr(app.state.mira, "userbot", None)
+    if not userbot or not userbot.available:
+        raise HTTPException(status_code=503, detail="Userbot not connected")
+
+    # Sync all contacts
+    contacts = db.get_all_telegram_contacts()
+    synced = 0
+    for contact in contacts:
+        name = contact.get("telegram_username") or contact.get("name")
+        messages = await userbot.get_recent_messages(name, limit=20)
+        for msg in messages:
+            db.save_telegram_message(
+                contact["id"], msg["role"], msg["content"],
+                source="userbot", telegram_message_id=msg.get("id"),
+            )
+        db.update_contact_synced(contact["id"])
+        synced += 1
+
+    return {"status": "ok", "contacts_synced": synced}
+
+
+# ═══════════════════════════════════════════════════════════════
+# SOUL SETTINGS — Per-relationship communication rules
+# ═══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/soul/settings")
+async def get_all_soul_settings():
+    """Get all soul settings (communication rules per relationship type)."""
+    settings = db.get_all_soul_settings()
+    if not settings:
+        # Return default presets so the UI has something to show
+        defaults = [
+            {"relationship_type": "friend", "tone": "casual", "formality": 2, "humor_level": 4,
+             "emoji_usage": "moderate", "response_length": "short", "proactive_outreach": 1,
+             "escalation_keywords": "[]", "custom_instructions": "", "enabled": 1},
+            {"relationship_type": "colleague", "tone": "professional", "formality": 3, "humor_level": 2,
+             "emoji_usage": "minimal", "response_length": "medium", "proactive_outreach": 0,
+             "escalation_keywords": "[]", "custom_instructions": "", "enabled": 1},
+            {"relationship_type": "family", "tone": "warm", "formality": 1, "humor_level": 4,
+             "emoji_usage": "moderate", "response_length": "medium", "proactive_outreach": 1,
+             "escalation_keywords": "[]", "custom_instructions": "", "enabled": 1},
+            {"relationship_type": "client", "tone": "professional", "formality": 4, "humor_level": 1,
+             "emoji_usage": "none", "response_length": "detailed", "proactive_outreach": 0,
+             "escalation_keywords": '["deadline", "budget", "contract", "payment"]',
+             "custom_instructions": "Always be courteous and solution-oriented.", "enabled": 1},
+        ]
+        # Seed defaults into DB
+        for d in defaults:
+            db.upsert_soul_setting(**d)
+        return db.get_all_soul_settings()
+    return settings
+
+
+@app.get("/api/soul/settings/{relationship_type}")
+async def get_soul_setting(relationship_type: str):
+    """Get soul settings for a specific relationship type."""
+    setting = db.get_soul_setting(relationship_type)
+    if not setting:
+        raise HTTPException(status_code=404, detail=f"No soul settings for '{relationship_type}'")
+    return setting
+
+
+@app.post("/api/soul/settings")
+async def upsert_soul_setting(request: Request):
+    """Create or update soul settings for a relationship type."""
+    body = await request.json()
+    rel_type = body.get("relationship_type")
+    if not rel_type:
+        raise HTTPException(status_code=400, detail="relationship_type is required")
+
+    sid = db.upsert_soul_setting(
+        relationship_type=rel_type,
+        tone=body.get("tone"),
+        formality=body.get("formality"),
+        humor_level=body.get("humor_level"),
+        emoji_usage=body.get("emoji_usage"),
+        response_length=body.get("response_length"),
+        proactive_outreach=body.get("proactive_outreach"),
+        escalation_keywords=body.get("escalation_keywords"),
+        custom_instructions=body.get("custom_instructions"),
+        enabled=body.get("enabled"),
+    )
+    return {"status": "ok", "id": sid, "relationship_type": rel_type}
+
+
+@app.delete("/api/soul/settings/{relationship_type}")
+async def delete_soul_setting(relationship_type: str):
+    """Delete soul settings for a relationship type."""
+    deleted = db.delete_soul_setting(relationship_type)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Setting not found")
+    return {"status": "deleted", "relationship_type": relationship_type}
 
 
 # ═══════════════════════════════════════════════════════════════

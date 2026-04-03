@@ -1,10 +1,11 @@
-import { Routes, Route, NavLink } from 'react-router-dom'
+import { Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import {
   LayoutDashboard, Brain, Users, Settings, Calendar,
   TrendingUp, DollarSign, Activity, Shield, Banknote, Key, LogOut,
-  Target, Heart, Scale, Clock
+  Target, Heart, Scale, Clock, Ghost
 } from 'lucide-react'
 
+import { AuthProvider, useAuth } from './auth/AuthContext'
 import Dashboard from './pages/Dashboard'
 import MemoryBrowser from './pages/MemoryBrowser'
 import PeopleCRM from './pages/PeopleCRM'
@@ -19,8 +20,9 @@ import DecisionJournal from './pages/DecisionJournal'
 import SchedulePage from './pages/SchedulePage'
 import SettingsPage from './pages/SettingsPage'
 import SetupPage from './pages/SetupPage'
+import SoulPage from './pages/SoulPage'
+import KillSwitchPage from './pages/KillSwitchPage'
 import LoginPage from './pages/LoginPage'
-import { logout } from './api/client'
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
@@ -35,11 +37,33 @@ const navItems = [
   { to: '/costs', icon: DollarSign, label: 'Costs' },
   { to: '/actions', icon: Activity, label: 'Actions' },
   { to: '/schedule', icon: Clock, label: 'Schedule' },
+  { to: '/soul', icon: Ghost, label: 'Soul' },
+  { to: '/killswitch', icon: Shield, label: 'Kill Switch' },
   { to: '/setup', icon: Key, label: 'Setup' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ]
 
+function RequireAuth({ children }) {
+  const { isAuthenticated, loading } = useAuth()
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
+        <div className="text-gray-500">Loading...</div>
+      </div>
+    )
+  }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />
+  }
+
+  return children
+}
+
 function MainLayout() {
+  const { logout } = useAuth()
+
   return (
     <div className="flex h-screen">
       {/* Sidebar */}
@@ -49,7 +73,7 @@ function MainLayout() {
           <p className="text-xs text-gray-500 mt-1">Autonomous Digital Twin</p>
         </div>
 
-        <div className="flex-1 py-4">
+        <div className="flex-1 py-4 overflow-y-auto">
           {navItems.map(({ to, icon: Icon, label }) => (
             <NavLink
               key={to}
@@ -70,17 +94,14 @@ function MainLayout() {
         </div>
 
         <div className="p-4 border-t border-gray-800">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs text-gray-600">
-              <Shield size={14} />
-              <span>Kill Switch: /killswitch</span>
-            </div>
+          <div className="flex items-center justify-end">
             <button
               onClick={logout}
-              className="text-gray-600 hover:text-red-400 transition-colors"
+              className="text-gray-600 hover:text-red-400 transition-colors flex items-center gap-2 text-xs"
               title="Logout"
             >
               <LogOut size={14} />
+              <span>Logout</span>
             </button>
           </div>
         </div>
@@ -101,6 +122,8 @@ function MainLayout() {
           <Route path="/costs" element={<CostTracker />} />
           <Route path="/actions" element={<ActionLog />} />
           <Route path="/schedule" element={<SchedulePage />} />
+          <Route path="/soul" element={<SoulPage />} />
+          <Route path="/killswitch" element={<KillSwitchPage />} />
           <Route path="/setup" element={<SetupPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
@@ -111,9 +134,15 @@ function MainLayout() {
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/*" element={<MainLayout />} />
-    </Routes>
+    <AuthProvider>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/*" element={
+          <RequireAuth>
+            <MainLayout />
+          </RequireAuth>
+        } />
+      </Routes>
+    </AuthProvider>
   )
 }

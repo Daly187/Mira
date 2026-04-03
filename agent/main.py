@@ -13,6 +13,7 @@ from pathlib import Path
 from config import Config
 from brain import MiraBrain
 from telegram_bot import MiraTelegramBot
+from telegram_userbot import TelegramUserbot
 from helpers.backup import create_backup
 from memory.sqlite_store import SQLiteStore
 from memory.vector_store import VectorStore
@@ -114,6 +115,9 @@ class Mira:
         self.orchestrator = Orchestrator(self) if Orchestrator else None
         self.computer_use = ComputerUseAgent(self) if ComputerUseAgent else None
 
+        # Telegram userbot (Telethon — sends as Daly)
+        self.userbot = TelegramUserbot(self)
+
         # Voice interface
         self.voice = VoiceInterface() if VoiceInterface else None
         if self.voice:
@@ -192,6 +196,16 @@ class Mira:
 
         # Start Telegram bot
         await self.telegram.start()
+
+        # Start userbot (Telethon — for real account messaging)
+        try:
+            ub_ok = await self.userbot.start()
+            if ub_ok:
+                logger.info("Userbot connected — Mira can message contacts.")
+            else:
+                logger.info("Userbot not available — configure TG_API_ID/TG_API_HASH to enable.")
+        except Exception as e:
+            logger.warning(f"Userbot start failed: {e}")
 
         # Log startup
         self.sqlite.log_action(
@@ -373,6 +387,32 @@ class Mira:
             callback=self._task_presence_check,
             schedule_type="interval",
             interval_seconds=7200,
+        ))
+
+        # ── Telegram Conversation Management ────────────────────────
+
+        # Sync conversations from userbot every 5 minutes
+        self.scheduler.add(ScheduledTask(
+            name="telegram_sync",
+            callback=self._task_telegram_sync,
+            schedule_type="interval",
+            interval_seconds=Config.TG_SYNC_INTERVAL,
+        ))
+
+        # Process scheduled messages every minute
+        self.scheduler.add(ScheduledTask(
+            name="scheduled_messages",
+            callback=self._task_process_scheduled_messages,
+            schedule_type="interval",
+            interval_seconds=60,
+        ))
+
+        # Proactive outreach check daily at 10am
+        self.scheduler.add(ScheduledTask(
+            name="proactive_outreach",
+            callback=self._task_proactive_outreach,
+            schedule_type="daily",
+            run_at=time(10, 0),
         ))
 
         # Monthly learning report — 1st of each month at 9am
@@ -646,6 +686,166 @@ class Mira:
                 self.sqlite.log_action("personal", "presence_check", "break reminder sent")
         except Exception as e:
             logger.debug(f"Presence check skipped: {e}")
+
+    # ── Telegram Conversation Tasks ─────────────────────────────────
+
+    async def _task_telegram_sync(self):
+        """Sync recent messages from userbot for all tracked contacts."""
+        if not self.userbot.available:
+            return
+        try:
+            contacts = self.sqlite.get_all_telegram_contacts()
+            for contact in contacts:
+                name = contact.get("telegram_username") or contact.get("name")
+                messages = await self.userbot.get_recent_messages(name, limit=20)
+                new_count = 0
+                for msg in messages:
+                    # save_telegram_message deduplicates by telegram_message_id
+                    result = self.sqlite.save_telegram_message(
+                        contact["id"], msg["role"], msg["content"],
+                        source="userbot", telegram_message_id=msg.get("id"),
+                    )
+                    if result:
+                        new_count += 1
+                self.sqlite.update_contact_synced(contact["id"])
+
+                # If new inbound messages and auto_reply, generate reply
+                new_inbound = [m for m in messages if m["role"] == "user"]
+                if new_inbound and contact.get("autonomy_level") == "auto_reply":
+                    last_msg = new_inbound[-1]
+                    # Check if we already replied (look at stored history)
+                    history = self.sqlite.get_telegram_history(contact["id"], limit=5)
+                    if history and history[-1]["role"] == "user":
+                        # Last stored message is from them — we haven't replied yet
+                        system_prompt = self.telegram._get_soul_prompt(contact)
+                        reply = await self.brain.think(
+                            prompt=last_msg["content"],
+                            system=system_prompt,
+                            tier="standard",
+                            task_type="conversation",
+                        )
+                        ub_name = contact.get("telegram_username") or contact.get("name")
+                        result = await self.userbot.send_message(ub_name, reply)
+                        if result:
+                            self.sqlite.save_telegram_message(
+                                contact["id"], "assistant", reply, source="userbot",
+                                telegram_message_id=result.get("message_id"),
+                            )
+                            self.sqlite.log_action("telegram", "sync_auto_reply",
+                                                    f"to {contact['name']}", {"reply": reply[:200]})
+
+                # Small delay between contacts to avoid flood limits
+                await asyncio.sleep(1)
+
+            logger.debug(f"Telegram sync complete — {len(contacts)} contacts checked.")
+        except Exception as e:
+            logger.error(f"Telegram sync failed: {e}")
+
+    async def _task_process_scheduled_messages(self):
+        """Send any scheduled messages that are due."""
+        if not self.userbot.available:
+            return
+        try:
+            pending = self.sqlite.get_pending_scheduled_messages()
+            for msg in pending:
+                contact_name = msg.get("telegram_username") or msg.get("contact_name")
+                result = await self.userbot.send_message(contact_name, msg["content"])
+                if result:
+                    self.sqlite.mark_scheduled_sent(msg["id"])
+                    self.sqlite.save_telegram_message(
+                        msg["contact_id"], "assistant", msg["content"], source="userbot",
+                        telegram_message_id=result.get("message_id"),
+                    )
+                    self.sqlite.log_action("telegram", "scheduled_sent",
+                                            f"to {msg['contact_name']}", {"text": msg["content"][:200]})
+                    logger.info(f"Scheduled message sent to {msg['contact_name']}")
+                else:
+                    self.sqlite.mark_scheduled_failed(msg["id"], "userbot send failed")
+                    logger.error(f"Failed to send scheduled message #{msg['id']}")
+                await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"Scheduled message processing failed: {e}")
+
+    async def _task_proactive_outreach(self):
+        """Check if Mira should proactively reach out to any contacts."""
+        if not self.userbot.available:
+            return
+        try:
+            contacts = self.sqlite.get_all_telegram_contacts()
+            soul_settings = {s["relationship_type"]: s for s in self.sqlite.get_all_soul_settings()}
+
+            for contact in contacts:
+                rel_type = contact.get("relationship_type", "unknown")
+                soul = soul_settings.get(rel_type, {})
+
+                # Check if proactive outreach is enabled for this relationship type
+                if not soul.get("proactive_outreach"):
+                    continue
+
+                # Skip silent contacts
+                if contact.get("autonomy_level") == "silent":
+                    continue
+
+                # Check when we last messaged them
+                last_msg = contact.get("last_message_at")
+                if last_msg:
+                    days_since = (datetime.now() - datetime.fromisoformat(str(last_msg))).days
+                    if days_since < 3:  # Don't nag — at most every 3 days
+                        continue
+
+                # Ask brain if outreach makes sense
+                facts = contact.get("key_facts", "[]")
+                threads = contact.get("open_threads", "[]")
+                prompt = (
+                    f"Should Mira proactively message {contact['name']}? "
+                    f"Relationship: {rel_type}. Last contact: {last_msg or 'never'}. "
+                    f"Key facts: {facts}. Open threads: {threads}. "
+                    f"Return JSON: {{\"should_reach_out\": bool, \"reason\": str, \"message\": str}}. "
+                    f"Only suggest if there's a genuine reason (follow-up, check-in, birthday, etc). "
+                    f"Keep the message natural and short."
+                )
+
+                result = await self.brain.think(prompt=prompt, tier="fast", task_type="classification")
+                try:
+                    import json
+                    data = json.loads(result)
+                    if not data.get("should_reach_out"):
+                        continue
+
+                    message = data.get("message", "")
+                    if not message:
+                        continue
+
+                    autonomy = contact.get("autonomy_level", "review_first")
+                    if autonomy == "auto_reply":
+                        # Send directly
+                        ub_name = contact.get("telegram_username") or contact.get("name")
+                        send_result = await self.userbot.send_message(ub_name, message)
+                        if send_result:
+                            self.sqlite.save_telegram_message(
+                                contact["id"], "assistant", message, source="userbot",
+                                telegram_message_id=send_result.get("message_id"),
+                            )
+                            self.sqlite.log_action("telegram", "proactive_outreach",
+                                                    f"to {contact['name']}", {"reason": data.get("reason", "")})
+                    else:
+                        # Send for owner review
+                        await self.telegram.send(
+                            f"PROACTIVE OUTREACH SUGGESTION\n"
+                            f"To: {contact['name']} ({rel_type})\n"
+                            f"Reason: {data.get('reason', 'check-in')}\n\n"
+                            f"Suggested message:\n{message}\n\n"
+                            f"Use /sendto {contact['name']} {message} to send."
+                        )
+
+                except (json.JSONDecodeError, KeyError):
+                    continue
+
+                await asyncio.sleep(2)
+
+            logger.debug("Proactive outreach check complete.")
+        except Exception as e:
+            logger.error(f"Proactive outreach failed: {e}")
 
     async def _task_email_check(self):
         """Periodic email check — triage and alert on high-urgency items."""
@@ -1125,6 +1325,7 @@ class Mira:
         self.sqlite.log_action("core", "shutdown", "clean")
 
         await self.telegram.stop()
+        await self.userbot.stop()
         self.sqlite.close()
         self.graph.close()
         logger.info("Mira offline.")

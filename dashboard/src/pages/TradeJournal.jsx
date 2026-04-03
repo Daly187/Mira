@@ -1,22 +1,38 @@
 import { useState, useEffect } from 'react'
-import { TrendingUp, TrendingDown, AlertCircle, PieChart, BarChart3 } from 'lucide-react'
-import { getTrades, getOpenTrades } from '../api/client'
+import { TrendingUp, TrendingDown, AlertCircle, PieChart, BarChart3, Plus, ArrowUpDown, Filter } from 'lucide-react'
+import { getTrades, getOpenTrades, createTrade } from '../api/client'
 
 export default function TradeJournal() {
   const [trades, setTrades] = useState([])
   const [openTrades, setOpenTrades] = useState([])
   const [tab, setTab] = useState('overview')
+  const [showAdd, setShowAdd] = useState(false)
+  const [newTrade, setNewTrade] = useState({
+    instrument: '', direction: 'buy', entry_price: '', size: '',
+    strategy: '', platform: 'mt5', rationale: '',
+  })
 
-  useEffect(() => {
-    Promise.all([getTrades(100), getOpenTrades()])
-      .then(([t, o]) => { setTrades(t); setOpenTrades(o) })
-      .catch(console.error)
-  }, [])
+  // History filters/sort
+  const [historyFilter, setHistoryFilter] = useState({ strategy: '', direction: '' })
+  const [historySort, setHistorySort] = useState('date') // date | pnl | instrument
+  const [historySortDir, setHistorySortDir] = useState('desc')
+
+  async function loadData() {
+    try {
+      const [t, o] = await Promise.all([getTrades(100), getOpenTrades()])
+      setTrades(t)
+      setOpenTrades(o)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  useEffect(() => { loadData() }, [])
 
   const closedTrades = trades.filter(t => t.pnl !== null)
   const totalPnl = closedTrades.reduce((sum, t) => sum + (t.pnl || 0), 0)
   const winners = closedTrades.filter(t => t.pnl > 0).length
-  const winRate = closedTrades.length > 0 ? (winners / closedTrades.length * 100) : 0
+  const winRate = closedTrades.length > 0 ? (winners / closedTrades.length * 100) : null
 
   // Platform breakdown
   const byPlatform = {}
@@ -37,7 +53,7 @@ export default function TradeJournal() {
     if ((t.pnl || 0) > 0) byStrategy[s].wins += 1
   })
 
-  // DCA positions (group open trades with strategy containing 'dca')
+  // DCA positions
   const dcaTrades = openTrades.filter(t => (t.strategy || '').toLowerCase().includes('dca'))
   const dcaByInstrument = {}
   dcaTrades.forEach(t => {
@@ -48,6 +64,52 @@ export default function TradeJournal() {
     dcaByInstrument[inst].count += 1
   })
 
+  // Filter and sort closed trades for history tab
+  const strategies = [...new Set(closedTrades.map(t => t.strategy || 'manual'))]
+  const filteredHistory = closedTrades
+    .filter(t => !historyFilter.strategy || (t.strategy || 'manual') === historyFilter.strategy)
+    .filter(t => !historyFilter.direction || t.direction === historyFilter.direction)
+    .sort((a, b) => {
+      let cmp = 0
+      if (historySort === 'date') {
+        cmp = (a.opened_at || '').localeCompare(b.opened_at || '')
+      } else if (historySort === 'pnl') {
+        cmp = (a.pnl || 0) - (b.pnl || 0)
+      } else if (historySort === 'instrument') {
+        cmp = (a.instrument || '').localeCompare(b.instrument || '')
+      }
+      return historySortDir === 'asc' ? cmp : -cmp
+    })
+
+  function toggleHistorySort(field) {
+    if (historySort === field) {
+      setHistorySortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setHistorySort(field)
+      setHistorySortDir('desc')
+    }
+  }
+
+  async function handleAddTrade() {
+    if (!newTrade.instrument.trim()) return
+    try {
+      await createTrade({
+        instrument: newTrade.instrument,
+        direction: newTrade.direction,
+        entry_price: newTrade.entry_price ? parseFloat(newTrade.entry_price) : undefined,
+        size: newTrade.size ? parseFloat(newTrade.size) : undefined,
+        strategy: newTrade.strategy || undefined,
+        platform: newTrade.platform,
+        rationale: newTrade.rationale || undefined,
+      })
+      setNewTrade({ instrument: '', direction: 'buy', entry_price: '', size: '', strategy: '', platform: 'mt5', rationale: '' })
+      setShowAdd(false)
+      await loadData()
+    } catch (e) {
+      console.error('Failed to log trade:', e)
+    }
+  }
+
   const tabs = [
     { id: 'overview', label: 'Overview' },
     { id: 'open', label: `Open (${openTrades.length})` },
@@ -56,8 +118,90 @@ export default function TradeJournal() {
 
   return (
     <div>
-      <h1 className="text-3xl font-bold mb-2">Trade Journal</h1>
+      <div className="flex items-center justify-between mb-2">
+        <h1 className="text-3xl font-bold">Trade Journal</h1>
+        <button
+          onClick={() => setShowAdd(!showAdd)}
+          className="flex items-center gap-2 px-4 py-2 bg-mira-500 hover:bg-mira-600 text-white rounded-lg text-sm"
+        >
+          <Plus size={16} /> Log Trade
+        </button>
+      </div>
       <p className="text-gray-500 text-sm mb-6">Every trade logged with full context and rationale</p>
+
+      {/* Add Trade Form */}
+      {showAdd && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 mb-6">
+          <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Log New Trade</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+            <input
+              value={newTrade.instrument}
+              onChange={(e) => setNewTrade({ ...newTrade, instrument: e.target.value })}
+              placeholder="Instrument (e.g. BTCUSD, EURUSD) *"
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200"
+            />
+            <select
+              value={newTrade.direction}
+              onChange={(e) => setNewTrade({ ...newTrade, direction: e.target.value })}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-300"
+            >
+              <option value="buy">Buy (Long)</option>
+              <option value="sell">Sell (Short)</option>
+            </select>
+            <input
+              type="number"
+              step="any"
+              value={newTrade.entry_price}
+              onChange={(e) => setNewTrade({ ...newTrade, entry_price: e.target.value })}
+              placeholder="Entry Price"
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200"
+            />
+            <input
+              type="number"
+              step="any"
+              value={newTrade.size}
+              onChange={(e) => setNewTrade({ ...newTrade, size: e.target.value })}
+              placeholder="Size / Lots"
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200"
+            />
+            <input
+              value={newTrade.strategy}
+              onChange={(e) => setNewTrade({ ...newTrade, strategy: e.target.value })}
+              placeholder="Strategy (e.g. dca, breakout, scalp)"
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200"
+            />
+            <select
+              value={newTrade.platform}
+              onChange={(e) => setNewTrade({ ...newTrade, platform: e.target.value })}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-300"
+            >
+              <option value="mt5">MT5</option>
+              <option value="binance">Binance</option>
+              <option value="kraken">Kraken</option>
+              <option value="polymarket">Polymarket</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <textarea
+            value={newTrade.rationale}
+            onChange={(e) => setNewTrade({ ...newTrade, rationale: e.target.value })}
+            placeholder="Rationale / trade thesis (why are you taking this trade?)"
+            rows={2}
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 mb-3"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={() => setShowAdd(false)}
+              className="px-4 py-2 text-gray-400 hover:text-gray-200 text-sm"
+            >
+              Cancel
+            </button>
+            <button onClick={handleAddTrade} className="px-4 py-2 bg-mira-500 hover:bg-mira-600 text-white rounded-lg text-sm">
+              Log Trade
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-4 gap-4 mb-6">
@@ -69,7 +213,9 @@ export default function TradeJournal() {
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
           <p className="text-xs text-gray-500">Win Rate</p>
-          <p className="text-2xl font-bold text-gray-200">{winRate.toFixed(1)}%</p>
+          <p className="text-2xl font-bold text-gray-200">
+            {winRate !== null ? `${winRate.toFixed(1)}%` : 'N/A'}
+          </p>
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
           <p className="text-xs text-gray-500">Total Trades</p>
@@ -101,7 +247,6 @@ export default function TradeJournal() {
       {/* Overview Tab */}
       {tab === 'overview' && (
         <div className="space-y-6">
-          {/* Platform Breakdown */}
           {Object.keys(byPlatform).length > 0 && (
             <div>
               <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
@@ -119,7 +264,6 @@ export default function TradeJournal() {
             </div>
           )}
 
-          {/* Strategy Performance */}
           {Object.keys(byStrategy).length > 0 && (
             <div>
               <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
@@ -156,7 +300,6 @@ export default function TradeJournal() {
             </div>
           )}
 
-          {/* DCA Summary */}
           {Object.keys(dcaByInstrument).length > 0 && (
             <div>
               <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
@@ -182,7 +325,7 @@ export default function TradeJournal() {
           {trades.length === 0 && openTrades.length === 0 && (
             <div className="text-center py-12 text-gray-600">
               <TrendingUp size={48} className="mx-auto mb-4 opacity-30" />
-              <p>No trades logged yet.</p>
+              <p>No trades logged yet. Use the "Log Trade" button to get started.</p>
             </div>
           )}
         </div>
@@ -238,8 +381,48 @@ export default function TradeJournal() {
       {/* History Tab */}
       {tab === 'history' && (
         <>
-          {closedTrades.length === 0 ? (
-            <p className="text-gray-600">No closed trades yet.</p>
+          {/* Filter and sort controls */}
+          <div className="flex items-center gap-3 mb-4">
+            <div className="flex items-center gap-1">
+              <Filter size={14} className="text-gray-500" />
+              <select
+                value={historyFilter.strategy}
+                onChange={(e) => setHistoryFilter({ ...historyFilter, strategy: e.target.value })}
+                className="bg-gray-900 border border-gray-800 rounded-lg px-3 py-1.5 text-sm text-gray-300"
+              >
+                <option value="">All strategies</option>
+                {strategies.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <select
+                value={historyFilter.direction}
+                onChange={(e) => setHistoryFilter({ ...historyFilter, direction: e.target.value })}
+                className="bg-gray-900 border border-gray-800 rounded-lg px-3 py-1.5 text-sm text-gray-300"
+              >
+                <option value="">All directions</option>
+                <option value="buy">Buy</option>
+                <option value="sell">Sell</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-1 ml-auto">
+              <ArrowUpDown size={14} className="text-gray-500" />
+              {['date', 'pnl', 'instrument'].map(field => (
+                <button
+                  key={field}
+                  onClick={() => toggleHistorySort(field)}
+                  className={`px-2 py-1 rounded text-xs ${historySort === field ? 'bg-mira-500/20 text-mira-300' : 'bg-gray-800 text-gray-400'}`}
+                >
+                  {field.charAt(0).toUpperCase() + field.slice(1)} {historySort === field ? (historySortDir === 'asc' ? '\u2191' : '\u2193') : ''}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <p className="text-xs text-gray-600 mb-3">{filteredHistory.length} trade{filteredHistory.length !== 1 ? 's' : ''} shown</p>
+
+          {filteredHistory.length === 0 ? (
+            <p className="text-gray-600">
+              {closedTrades.length === 0 ? 'No closed trades yet.' : 'No trades match your filters.'}
+            </p>
           ) : (
             <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
               <table className="w-full text-sm">
@@ -255,7 +438,7 @@ export default function TradeJournal() {
                   </tr>
                 </thead>
                 <tbody>
-                  {closedTrades.map(t => (
+                  {filteredHistory.map(t => (
                     <tr key={t.id} className="border-t border-gray-800">
                       <td className="p-3 font-medium text-gray-200">{t.instrument}</td>
                       <td className="p-3">

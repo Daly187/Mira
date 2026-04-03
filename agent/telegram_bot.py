@@ -147,6 +147,11 @@ class MiraTelegramBot:
         self.app.add_handler(CommandHandler("clipboard", self._cmd_clipboard))
         self.app.add_handler(CommandHandler("processes", self._cmd_processes))
 
+        # ── Userbot / Conversation Commands ────────────────────────────
+        self.app.add_handler(CommandHandler("sendto", self._cmd_sendto))
+        self.app.add_handler(CommandHandler("userbot_auth", self._cmd_userbot_auth))
+        self.app.add_handler(CommandHandler("userbot_status", self._cmd_userbot_status))
+
         # ── System Commands ─────────────────────────────────────────────
         self.app.add_handler(CommandHandler("update", self._cmd_update))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
@@ -2056,6 +2061,32 @@ Return JSON with:
             platform = metadata.get("platform", "unknown")
             return f"Queued for {platform}. (Social posting in Phase 8)"
 
+        if draft_type == "telegram_reply":
+            # Send the approved reply to the contact's Telegram chat
+            chat_id = metadata.get("chat_id")
+            contact_id = metadata.get("contact_id")
+            contact_name = metadata.get("contact_name", "Unknown")
+            if chat_id:
+                try:
+                    await self.app.bot.send_message(chat_id=chat_id, text=draft["text"])
+                    # Update the flagged message to approved
+                    if contact_id:
+                        self.mira.sqlite.conn.execute(
+                            """UPDATE telegram_messages SET review_status = 'approved'
+                               WHERE contact_id = ? AND flagged_for_review = 1
+                               AND review_status = 'none'
+                               ORDER BY created_at DESC LIMIT 1""",
+                            (contact_id,),
+                        )
+                        self.mira.sqlite.conn.commit()
+                    self.mira.sqlite.log_action("telegram", "review_approved",
+                                                 f"reply sent to {contact_name}")
+                    return f"Reply sent to {contact_name} on Telegram."
+                except Exception as e:
+                    logger.error(f"Failed to send Telegram reply: {e}")
+                    return f"Failed to send: {e}"
+            return "No chat ID found for this contact."
+
         return "Draft accepted. Execution handler not yet implemented for this type."
 
     # ══════════════════════════════════════════════════════════════════
@@ -2258,14 +2289,331 @@ Return JSON with:
         await update.message.reply_text(f"Monthly P&L\n\n{report[:3800]}")
 
     # ══════════════════════════════════════════════════════════════════
+    # USERBOT COMMANDS
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _cmd_sendto(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Send a message to a contact via the userbot. Usage: /sendto <name> <message>"""
+        args = (update.message.text or "").split(None, 2)
+        if len(args) < 3:
+            await update.message.reply_text("Usage: /sendto <contact_name> <message>")
+            return
+
+        contact_name = args[1]
+        message_text = args[2]
+
+        userbot = getattr(self.mira, "userbot", None)
+        if not userbot or not userbot.available:
+            await update.message.reply_text("Userbot not connected. Set TG_API_ID/TG_API_HASH in .env")
+            return
+
+        # Look up contact for context
+        contact = self.mira.sqlite.get_telegram_contact(name=contact_name)
+        ub_name = contact_name
+        if contact:
+            ub_name = contact.get("telegram_username") or contact.get("name")
+
+        result = await userbot.send_message(ub_name, message_text)
+        if result:
+            if contact:
+                self.mira.sqlite.save_telegram_message(
+                    contact["id"], "assistant", message_text, source="userbot",
+                    telegram_message_id=result.get("message_id"),
+                )
+            await update.message.reply_text(f"Sent to {contact_name}")
+        else:
+            await update.message.reply_text(f"Failed to send to {contact_name}")
+
+    async def _cmd_userbot_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Complete userbot authentication. Usage: /userbot_auth <code> [password]"""
+        args = (update.message.text or "").split()
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /userbot_auth <code> [2fa_password]")
+            return
+
+        code = args[1]
+        password = args[2] if len(args) > 2 else None
+
+        userbot = getattr(self.mira, "userbot", None)
+        if not userbot:
+            await update.message.reply_text("Userbot not initialized.")
+            return
+
+        success = await userbot.complete_auth(code, password)
+        if success:
+            await update.message.reply_text("Userbot authenticated successfully!")
+        else:
+            await update.message.reply_text("Auth failed. Check code/password and try again.")
+
+    async def _cmd_userbot_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Check userbot connection status."""
+        userbot = getattr(self.mira, "userbot", None)
+        if not userbot:
+            await update.message.reply_text("Userbot: not initialized (TG_API_ID not set)")
+        elif not userbot.available:
+            await update.message.reply_text("Userbot: disconnected or awaiting auth")
+        else:
+            me = await userbot.client.get_me()
+            contacts = self.mira.sqlite.get_all_telegram_contacts()
+            scheduled = self.mira.sqlite.get_scheduled_messages(status="pending")
+            await update.message.reply_text(
+                f"Userbot: connected as {me.first_name} (@{me.username or 'N/A'})\n"
+                f"Contacts: {len(contacts)}\n"
+                f"Scheduled messages: {len(scheduled)}"
+            )
+
+    # ══════════════════════════════════════════════════════════════════
+    # AUTONOMOUS CONVERSATION ENGINE
+    # ══════════════════════════════════════════════════════════════════
+
+    # Keywords that always trigger escalation to the owner for review
+    ESCALATION_KEYWORDS = [
+        "urgent", "emergency", "legal", "lawyer", "contract",
+        "lawsuit", "police", "fire", "hospital", "crisis",
+        "deadline tonight", "need you now", "call me", "money",
+        "payment", "invoice", "confidential", "NDA", "resign",
+    ]
+
+    def _needs_escalation(self, text: str) -> bool:
+        """Check if a message contains keywords that require owner review."""
+        text_lower = text.lower()
+        return any(kw in text_lower for kw in self.ESCALATION_KEYWORDS)
+
+    def _get_soul_prompt(self, contact: dict) -> str:
+        """Build a persona-aware system prompt for autonomous contact replies."""
+        rel_type = contact.get("relationship_type", "unknown")
+        style = contact.get("communication_style", "casual and friendly")
+        facts = contact.get("key_facts", "[]")
+        threads = contact.get("open_threads", "[]")
+        name = contact.get("name", "this person")
+
+        # Load soul settings for this relationship type
+        soul = self.mira.sqlite.get_soul_setting(rel_type)
+        soul_instructions = ""
+        if soul:
+            soul_instructions = f"""
+SOUL SETTINGS FOR {rel_type.upper()} RELATIONSHIPS:
+- Tone: {soul.get('tone', 'casual')}
+- Formality level: {soul.get('formality', 3)}/5
+- Humor level: {soul.get('humor_level', 3)}/5
+- Emoji usage: {soul.get('emoji_usage', 'minimal')}
+- Response length: {soul.get('response_length', 'medium')}
+- Custom instructions: {soul.get('custom_instructions', 'None')}
+"""
+
+        return f"""You are Mira, communicating on behalf of Daly via Telegram.
+You are NOT a chatbot. You ARE Daly's digital proxy — respond AS IF you are Daly.
+
+ABOUT DALY:
+- CFO at Boldr Impact, a global BPO company
+- Based in the Philippines (Manila)
+- Direct, informal, sharp sense of humour
+- Hates waffle. Gets straight to the point.
+- Values loyalty and directness above everything
+
+CURRENT CONTACT:
+- Name: {name}
+- Relationship: {rel_type}
+- Communication style with this person: {style}
+- Key facts about them: {facts}
+- Open threads / unresolved topics: {threads}
+{soul_instructions}
+HOW TO COMMUNICATE:
+- Match their tone — if casual, be casual. If formal, adjust accordingly.
+- Short messages unless the situation demands more detail.
+- Never lie or fabricate information. If unsure, say you'll check and get back.
+- Never reveal you are an AI unless directly asked.
+- Never promise things Daly cannot deliver.
+- If a message requires a real decision from Daly, say you need to check with him.
+- Sign off naturally — no "Best regards" unless that's the norm with this contact.
+"""
+
+    async def _handle_contact_message(self, update: Update, contact: dict):
+        """Handle an incoming message from a whitelisted Telegram contact."""
+        user_message = update.message.text
+        contact_id = contact["id"]
+        contact_name = contact["name"]
+        autonomy = contact.get("autonomy_level", "review_first")
+
+        logger.info(f"Contact message from {contact_name} ({autonomy}): {user_message[:80]}")
+
+        # Store the incoming message
+        self.mira.sqlite.save_telegram_message(contact_id, "user", user_message)
+
+        # Silent mode: store but never reply — notify owner via bot
+        if autonomy == "silent":
+            logger.info(f"Silent mode for {contact_name} — message stored, no reply.")
+            self.mira.sqlite.log_action("telegram", "contact_message_silent",
+                                         f"from {contact_name}", {"message": user_message[:200]})
+            # Notify owner so they see the message
+            await self.send(
+                f"[Silent] Message from {contact_name}:\n{user_message[:500]}"
+            )
+            return
+
+        # Check for escalation keywords — always route to review regardless of whitelist
+        if self._needs_escalation(user_message):
+            # Also check soul-level escalation keywords
+            rel_type = contact.get("relationship_type", "unknown")
+            soul = self.mira.sqlite.get_soul_setting(rel_type)
+            if soul:
+                extra_keywords = json.loads(soul.get("escalation_keywords", "[]"))
+                # Already escalated by default keywords, but log the extra match
+            logger.info(f"Escalation triggered for message from {contact_name}")
+            autonomy = "review_first"  # force review
+
+        # Get conversation history
+        history = self.mira.sqlite.get_telegram_history(contact_id, limit=10)
+        messages = [{"role": m["role"], "content": m["content"]} for m in history]
+
+        # Generate reply via brain
+        system_prompt = self._get_soul_prompt(contact)
+        try:
+            reply = await self.mira.brain.think(
+                prompt=user_message,
+                system=system_prompt,
+                context=messages,
+                tier="standard",
+                task_type="conversation",
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate reply for {contact_name}: {e}")
+            # Notify owner of failure
+            await self.send(f"Failed to generate reply for {contact_name}: {e}")
+            return
+
+        if autonomy == "auto_reply":
+            # Try userbot first (sends as Daly), fall back to bot
+            sent_via = "bot"
+            userbot = getattr(self.mira, "userbot", None)
+            if userbot and userbot.available:
+                ub_name = contact.get("telegram_username") or contact_name
+                result = await userbot.send_message(ub_name, reply)
+                if result:
+                    sent_via = "userbot"
+                    self.mira.sqlite.save_telegram_message(
+                        contact_id, "assistant", reply, source="userbot",
+                        telegram_message_id=result.get("message_id"),
+                    )
+
+            if sent_via == "bot":
+                chat_id = str(update.effective_chat.id)
+                await self.app.bot.send_message(chat_id=chat_id, text=reply)
+                self.mira.sqlite.save_telegram_message(contact_id, "assistant", reply, source="bot")
+
+            self.mira.sqlite.log_action("telegram", "auto_reply",
+                                         f"to {contact_name} via {sent_via}", {"reply": reply[:200]})
+            logger.info(f"Auto-reply sent to {contact_name} via {sent_via}")
+
+            # Extract and store key points asynchronously
+            try:
+                await self._extract_contact_memory(contact_id, contact)
+            except Exception as e:
+                logger.error(f"Memory extraction failed for {contact_name}: {e}")
+
+        elif autonomy == "review_first":
+            # Store draft and send to owner for review
+            self.mira.sqlite.save_telegram_message(contact_id, "assistant", reply, flagged=True)
+            draft_id = f"tg_{contact_id}_{int(datetime.now().timestamp())}"
+            self.pending_drafts[draft_id] = {
+                "text": reply,
+                "type": "telegram_reply",
+                "metadata": {
+                    "contact_id": contact_id,
+                    "contact_name": contact_name,
+                    "chat_id": str(update.effective_chat.id),
+                    "original_message": user_message,
+                },
+            }
+            # Send review request to owner
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Send", callback_data=f"accept:{draft_id}"),
+                    InlineKeyboardButton("Edit", callback_data=f"edit:{draft_id}"),
+                    InlineKeyboardButton("Reject", callback_data=f"reject:{draft_id}"),
+                ]
+            ])
+            review_text = (
+                f"TELEGRAM REVIEW\n"
+                f"From: {contact_name}\n"
+                f"Message: {user_message}\n\n"
+                f"Mira's draft reply:\n{reply}"
+            )
+            await self.send(review_text)
+            if self.chat_id:
+                await self.app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text="Approve this reply?",
+                    reply_markup=keyboard,
+                )
+            self.mira.sqlite.log_action("telegram", "review_queued",
+                                         f"for {contact_name}", {"draft": reply[:200]})
+
+    async def _extract_contact_memory(self, contact_id: int, contact: dict):
+        """Extract key facts from recent conversation and update contact record."""
+        history = self.mira.sqlite.get_telegram_history(contact_id, limit=20)
+        if not history:
+            return
+
+        convo_text = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in history])
+
+        prompt = (
+            "Analyse this conversation and return a JSON object with:\n"
+            '- key_facts: list of important facts learned about this person\n'
+            '- open_threads: list of unresolved topics or pending follow-ups\n'
+            "Return only valid JSON. No preamble.\n\n"
+            f"CONVERSATION:\n{convo_text}"
+        )
+
+        try:
+            result = await self.mira.brain.think(
+                prompt=prompt,
+                tier="fast",
+                task_type="entity_extraction",
+            )
+            data = json.loads(result)
+            new_facts = data.get("key_facts", [])
+            new_threads = data.get("open_threads", [])
+
+            if new_facts:
+                old_facts = json.loads(contact.get("key_facts", "[]"))
+                merged_facts = list(set(old_facts + new_facts))
+                self.mira.sqlite.upsert_telegram_contact(
+                    contact["name"], key_facts=merged_facts
+                )
+
+            if new_threads:
+                self.mira.sqlite.conn.execute(
+                    "UPDATE telegram_contacts SET open_threads = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(new_threads), datetime.now().isoformat(), contact_id),
+                )
+                self.mira.sqlite.conn.commit()
+
+        except Exception as e:
+            logger.error(f"Contact memory extraction failed: {e}")
+
+    # ══════════════════════════════════════════════════════════════════
     # MESSAGE HANDLER
     # ══════════════════════════════════════════════════════════════════
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle regular text messages — Mira's conversational interface."""
+        """Handle regular text messages — routes to owner interface or autonomous contact replies."""
         user_message = update.message.text
-        logger.info(f"Message received: {user_message[:100]}")
+        sender_id = str(update.effective_user.id)
+        logger.info(f"Message from {sender_id}: {user_message[:100]}")
 
+        # Check if this is from a whitelisted contact (not the owner)
+        if sender_id != self.chat_id:
+            contact = self.mira.sqlite.get_telegram_contact(telegram_user_id=sender_id)
+            if contact:
+                await self._handle_contact_message(update, contact)
+                return
+            else:
+                # Unknown sender — ignore or log
+                logger.info(f"Message from unknown sender {sender_id}, ignoring.")
+                return
+
+        # ── Owner message handling below ────────────────────────────
         if not self.chat_id:
             self.chat_id = str(update.effective_chat.id)
 

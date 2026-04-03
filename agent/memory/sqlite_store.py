@@ -170,6 +170,80 @@ class SQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_action_log_created ON action_log(created_at);
             CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage(created_at);
             CREATE INDEX IF NOT EXISTS idx_api_usage_tier ON api_usage(tier);
+
+            -- Telegram contacts: autonomous conversation whitelist + per-contact settings
+            CREATE TABLE IF NOT EXISTS telegram_contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                telegram_user_id TEXT,
+                telegram_username TEXT,
+                autonomy_level TEXT DEFAULT 'review_first',
+                relationship_type TEXT DEFAULT 'unknown',
+                communication_style TEXT DEFAULT 'casual and friendly',
+                key_facts TEXT DEFAULT '[]',
+                open_threads TEXT DEFAULT '[]',
+                conversation_count INTEGER DEFAULT 0,
+                last_message_at TIMESTAMP,
+                last_synced_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT DEFAULT '{}'
+            );
+
+            -- Soul settings: per-relationship-type communication rules
+            CREATE TABLE IF NOT EXISTS soul_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                relationship_type TEXT UNIQUE NOT NULL,
+                tone TEXT DEFAULT 'casual',
+                formality INTEGER DEFAULT 3,
+                humor_level INTEGER DEFAULT 3,
+                emoji_usage TEXT DEFAULT 'minimal',
+                response_length TEXT DEFAULT 'medium',
+                proactive_outreach INTEGER DEFAULT 0,
+                escalation_keywords TEXT DEFAULT '[]',
+                custom_instructions TEXT DEFAULT '',
+                enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- Telegram message history for autonomous conversations
+            CREATE TABLE IF NOT EXISTS telegram_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contact_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                flagged_for_review INTEGER DEFAULT 0,
+                review_status TEXT DEFAULT 'none',
+                source TEXT DEFAULT 'bot',
+                telegram_message_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (contact_id) REFERENCES telegram_contacts(id)
+            );
+
+            -- Scheduled messages for future delivery
+            CREATE TABLE IF NOT EXISTS scheduled_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contact_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                send_at TIMESTAMP NOT NULL,
+                status TEXT DEFAULT 'pending',
+                reason TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sent_at TIMESTAMP,
+                error TEXT,
+                FOREIGN KEY (contact_id) REFERENCES telegram_contacts(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_telegram_contacts_name ON telegram_contacts(name);
+            CREATE INDEX IF NOT EXISTS idx_telegram_contacts_user_id ON telegram_contacts(telegram_user_id);
+            CREATE INDEX IF NOT EXISTS idx_telegram_contacts_autonomy ON telegram_contacts(autonomy_level);
+            CREATE INDEX IF NOT EXISTS idx_soul_settings_type ON soul_settings(relationship_type);
+            CREATE INDEX IF NOT EXISTS idx_telegram_messages_contact ON telegram_messages(contact_id);
+            CREATE INDEX IF NOT EXISTS idx_telegram_messages_created ON telegram_messages(created_at);
+            CREATE INDEX IF NOT EXISTS idx_telegram_messages_tg_id ON telegram_messages(telegram_message_id);
+            CREATE INDEX IF NOT EXISTS idx_scheduled_messages_send_at ON scheduled_messages(send_at);
+            CREATE INDEX IF NOT EXISTS idx_scheduled_messages_status ON scheduled_messages(status);
         """)
         self.conn.commit()
 
@@ -314,6 +388,329 @@ class SQLiteStore:
             "SELECT * FROM people ORDER BY last_interaction DESC"
         ).fetchall()
         return [dict(row) for row in rows]
+
+    # ── Telegram Contacts (Autonomous Conversations) ─────────────────
+
+    def upsert_telegram_contact(
+        self,
+        name: str,
+        telegram_user_id: str = None,
+        telegram_username: str = None,
+        autonomy_level: str = None,
+        relationship_type: str = None,
+        communication_style: str = None,
+        key_facts: list = None,
+        metadata: dict = None,
+    ) -> int:
+        """Create or update a Telegram contact for autonomous messaging."""
+        existing = self.conn.execute(
+            "SELECT * FROM telegram_contacts WHERE name = ? COLLATE NOCASE", (name,)
+        ).fetchone()
+
+        if existing:
+            updates = []
+            params = []
+            if telegram_user_id is not None:
+                updates.append("telegram_user_id = ?")
+                params.append(telegram_user_id)
+            if telegram_username is not None:
+                updates.append("telegram_username = ?")
+                params.append(telegram_username)
+            if autonomy_level is not None:
+                updates.append("autonomy_level = ?")
+                params.append(autonomy_level)
+            if relationship_type is not None:
+                updates.append("relationship_type = ?")
+                params.append(relationship_type)
+            if communication_style is not None:
+                updates.append("communication_style = ?")
+                params.append(communication_style)
+            if key_facts is not None:
+                old_facts = json.loads(existing["key_facts"])
+                merged = list(set(old_facts + key_facts))
+                updates.append("key_facts = ?")
+                params.append(json.dumps(merged))
+            if metadata is not None:
+                updates.append("metadata = ?")
+                params.append(json.dumps(metadata))
+
+            updates.append("updated_at = ?")
+            params.append(datetime.now().isoformat())
+            params.append(existing["id"])
+            self.conn.execute(
+                f"UPDATE telegram_contacts SET {', '.join(updates)} WHERE id = ?", params
+            )
+            self.conn.commit()
+            return existing["id"]
+        else:
+            cursor = self.conn.execute(
+                """INSERT INTO telegram_contacts
+                   (name, telegram_user_id, telegram_username, autonomy_level,
+                    relationship_type, communication_style, key_facts, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    name,
+                    telegram_user_id,
+                    telegram_username,
+                    autonomy_level or "review_first",
+                    relationship_type or "unknown",
+                    communication_style or "casual and friendly",
+                    json.dumps(key_facts or []),
+                    json.dumps(metadata or {}),
+                ),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
+
+    def get_telegram_contact(self, name: str = None, telegram_user_id: str = None) -> Optional[dict]:
+        """Look up a Telegram contact by name or user ID."""
+        if telegram_user_id:
+            row = self.conn.execute(
+                "SELECT * FROM telegram_contacts WHERE telegram_user_id = ?", (telegram_user_id,)
+            ).fetchone()
+        elif name:
+            row = self.conn.execute(
+                "SELECT * FROM telegram_contacts WHERE name LIKE ? COLLATE NOCASE", (f"%{name}%",)
+            ).fetchone()
+        else:
+            return None
+        return dict(row) if row else None
+
+    def get_all_telegram_contacts(self) -> list[dict]:
+        """Get all Telegram contacts."""
+        rows = self.conn.execute(
+            "SELECT * FROM telegram_contacts ORDER BY updated_at DESC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_telegram_contact(self, contact_id: int) -> bool:
+        """Delete a Telegram contact and their message history."""
+        self.conn.execute("DELETE FROM telegram_messages WHERE contact_id = ?", (contact_id,))
+        cursor = self.conn.execute("DELETE FROM telegram_contacts WHERE id = ?", (contact_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def save_telegram_message(self, contact_id: int, role: str, content: str,
+                               flagged: bool = False, source: str = "bot",
+                               telegram_message_id: int = None) -> int:
+        """Store a message in the Telegram conversation history."""
+        # Dedup by telegram_message_id if provided
+        if telegram_message_id:
+            existing = self.conn.execute(
+                "SELECT id FROM telegram_messages WHERE telegram_message_id = ? AND contact_id = ?",
+                (telegram_message_id, contact_id),
+            ).fetchone()
+            if existing:
+                return existing["id"]
+
+        cursor = self.conn.execute(
+            """INSERT INTO telegram_messages
+               (contact_id, role, content, flagged_for_review, source, telegram_message_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (contact_id, role, content, 1 if flagged else 0, source, telegram_message_id),
+        )
+        self.conn.execute(
+            """UPDATE telegram_contacts SET last_message_at = ?, conversation_count = conversation_count + 1,
+               updated_at = ? WHERE id = ?""",
+            (datetime.now().isoformat(), datetime.now().isoformat(), contact_id),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def update_contact_synced(self, contact_id: int):
+        """Update the last_synced_at timestamp for a contact."""
+        self.conn.execute(
+            "UPDATE telegram_contacts SET last_synced_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), contact_id),
+        )
+        self.conn.commit()
+
+    def get_telegram_history(self, contact_id: int, limit: int = 20) -> list[dict]:
+        """Get recent message history for a Telegram contact."""
+        rows = self.conn.execute(
+            """SELECT * FROM telegram_messages WHERE contact_id = ?
+               ORDER BY created_at DESC LIMIT ?""",
+            (contact_id, limit),
+        ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def get_pending_reviews(self) -> list[dict]:
+        """Get all messages flagged for review that haven't been approved/rejected."""
+        rows = self.conn.execute(
+            """SELECT m.*, tc.name as contact_name FROM telegram_messages m
+               JOIN telegram_contacts tc ON m.contact_id = tc.id
+               WHERE m.flagged_for_review = 1 AND m.review_status = 'none'
+               ORDER BY m.created_at DESC"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ── Soul Settings (Communication Rules per Relationship Type) ────
+
+    def upsert_soul_setting(
+        self,
+        relationship_type: str,
+        tone: str = None,
+        formality: int = None,
+        humor_level: int = None,
+        emoji_usage: str = None,
+        response_length: str = None,
+        proactive_outreach: bool = None,
+        escalation_keywords: list = None,
+        custom_instructions: str = None,
+        enabled: bool = None,
+    ) -> int:
+        """Create or update soul settings for a relationship type."""
+        existing = self.conn.execute(
+            "SELECT * FROM soul_settings WHERE relationship_type = ? COLLATE NOCASE",
+            (relationship_type,),
+        ).fetchone()
+
+        if existing:
+            updates = []
+            params = []
+            if tone is not None:
+                updates.append("tone = ?"); params.append(tone)
+            if formality is not None:
+                updates.append("formality = ?"); params.append(formality)
+            if humor_level is not None:
+                updates.append("humor_level = ?"); params.append(humor_level)
+            if emoji_usage is not None:
+                updates.append("emoji_usage = ?"); params.append(emoji_usage)
+            if response_length is not None:
+                updates.append("response_length = ?"); params.append(response_length)
+            if proactive_outreach is not None:
+                updates.append("proactive_outreach = ?"); params.append(1 if proactive_outreach else 0)
+            if escalation_keywords is not None:
+                updates.append("escalation_keywords = ?"); params.append(json.dumps(escalation_keywords))
+            if custom_instructions is not None:
+                updates.append("custom_instructions = ?"); params.append(custom_instructions)
+            if enabled is not None:
+                updates.append("enabled = ?"); params.append(1 if enabled else 0)
+
+            updates.append("updated_at = ?")
+            params.append(datetime.now().isoformat())
+            params.append(existing["id"])
+            self.conn.execute(
+                f"UPDATE soul_settings SET {', '.join(updates)} WHERE id = ?", params
+            )
+            self.conn.commit()
+            return existing["id"]
+        else:
+            cursor = self.conn.execute(
+                """INSERT INTO soul_settings
+                   (relationship_type, tone, formality, humor_level, emoji_usage,
+                    response_length, proactive_outreach, escalation_keywords,
+                    custom_instructions, enabled)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    relationship_type,
+                    tone or "casual",
+                    formality if formality is not None else 3,
+                    humor_level if humor_level is not None else 3,
+                    emoji_usage or "minimal",
+                    response_length or "medium",
+                    1 if proactive_outreach else 0,
+                    json.dumps(escalation_keywords or []),
+                    custom_instructions or "",
+                    1 if enabled is not False else 0,
+                ),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
+
+    def get_soul_setting(self, relationship_type: str) -> Optional[dict]:
+        """Get soul settings for a specific relationship type."""
+        row = self.conn.execute(
+            "SELECT * FROM soul_settings WHERE relationship_type = ? COLLATE NOCASE",
+            (relationship_type,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_soul_settings(self) -> list[dict]:
+        """Get all soul settings."""
+        rows = self.conn.execute(
+            "SELECT * FROM soul_settings ORDER BY relationship_type"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_soul_setting(self, relationship_type: str) -> bool:
+        """Delete soul settings for a relationship type."""
+        cursor = self.conn.execute(
+            "DELETE FROM soul_settings WHERE relationship_type = ? COLLATE NOCASE",
+            (relationship_type,),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    # ── Scheduled Messages ──────────────────────────────────────────
+
+    def save_scheduled_message(self, contact_id: int, content: str,
+                                send_at: str, reason: str = "") -> int:
+        """Schedule a message for future delivery."""
+        cursor = self.conn.execute(
+            """INSERT INTO scheduled_messages (contact_id, content, send_at, reason)
+               VALUES (?, ?, ?, ?)""",
+            (contact_id, content, send_at, reason),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_pending_scheduled_messages(self) -> list[dict]:
+        """Get scheduled messages that are due for sending."""
+        rows = self.conn.execute(
+            """SELECT sm.*, tc.name as contact_name, tc.telegram_username
+               FROM scheduled_messages sm
+               JOIN telegram_contacts tc ON sm.contact_id = tc.id
+               WHERE sm.status = 'pending' AND sm.send_at <= ?
+               ORDER BY sm.send_at ASC""",
+            (datetime.now().isoformat(),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_scheduled_messages(self, contact_id: int = None, status: str = None) -> list[dict]:
+        """Get scheduled messages with optional filters."""
+        conditions = []
+        params = []
+        if contact_id:
+            conditions.append("sm.contact_id = ?")
+            params.append(contact_id)
+        if status:
+            conditions.append("sm.status = ?")
+            params.append(status)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self.conn.execute(
+            f"""SELECT sm.*, tc.name as contact_name FROM scheduled_messages sm
+                JOIN telegram_contacts tc ON sm.contact_id = tc.id
+                {where} ORDER BY sm.send_at DESC""",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_scheduled_sent(self, message_id: int):
+        """Mark a scheduled message as sent."""
+        self.conn.execute(
+            "UPDATE scheduled_messages SET status = 'sent', sent_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), message_id),
+        )
+        self.conn.commit()
+
+    def mark_scheduled_failed(self, message_id: int, error: str):
+        """Mark a scheduled message as failed."""
+        self.conn.execute(
+            "UPDATE scheduled_messages SET status = 'failed', error = ? WHERE id = ?",
+            (error, message_id),
+        )
+        self.conn.commit()
+
+    def cancel_scheduled_message(self, message_id: int) -> bool:
+        """Cancel a pending scheduled message."""
+        cursor = self.conn.execute(
+            "UPDATE scheduled_messages SET status = 'cancelled' WHERE id = ? AND status = 'pending'",
+            (message_id,),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
 
     # ── Events ───────────────────────────────────────────────────────
 

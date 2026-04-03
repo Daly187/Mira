@@ -98,6 +98,13 @@ class Config:
     WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
     WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
 
+    # ── Telegram Userbot (Telethon) ─────────────────────────────
+    TG_API_ID = os.getenv("TG_API_ID", "")
+    TG_API_HASH = os.getenv("TG_API_HASH", "")
+    TG_PHONE = os.getenv("TG_PHONE", "")
+    TG_SESSION_PATH = DATA_DIR / "telegram_userbot"
+    TG_SYNC_INTERVAL = int(os.getenv("TG_SYNC_INTERVAL", "300"))  # seconds
+
     @classmethod
     def reload(cls):
         """Re-read all config values from os.environ (call after .env update)."""
@@ -128,6 +135,10 @@ class Config:
         cls.API_TOKEN = os.getenv("API_TOKEN", "")
         cls.WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
         cls.WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
+        cls.TG_API_ID = os.getenv("TG_API_ID", "")
+        cls.TG_API_HASH = os.getenv("TG_API_HASH", "")
+        cls.TG_PHONE = os.getenv("TG_PHONE", "")
+        cls.TG_SYNC_INTERVAL = int(os.getenv("TG_SYNC_INTERVAL", "300"))
 
     @classmethod
     def ensure_dirs(cls):
